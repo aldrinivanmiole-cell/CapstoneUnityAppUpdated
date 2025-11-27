@@ -1,0 +1,61 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1045 &1
+EditorBuildSettings:
+  m_ObjectHideFlags: 0
+  serializedVersion: 2
+  m_Scenes:
+  - enabled: 1
+    path: Assets/Scenes/login.unity
+    guid: 8c9cfa26abfee488c85f1582747f6a02
+  - enabled: 1
+    path: Assets/Scenes/register.unity
+    guid: 10fdbd11f3a2cbc4c90b7c746279ee30
+  - enabled: 1
+    path: Assets/Scenes/instruction.unity
+    guid: 5bc75742596437f409fe05e3079075ad
+  - enabled: 1
+    path: Assets/Scenes/map.unity
+    guid: 9962b00deafea97489693fdcb9fed1f2
+  - enabled: 1
+    path: Assets/Scenes/ps.unity
+    guid: b00af1871a321f648be7fac454b81f62
+  - enabled: 1
+    path: Assets/Scenes/classroom.unity
+    guid: 9678d184c9bec3848978e8376e557723
+  - enabled: 1
+    path: Assets/Scenes/fib.unity
+    guid: 91350811ab2cfee49a7694928dd2aa33
+  - enabled: 1
+    path: Assets/Scenes/mc.unity
+    guid: 7d22d30b476f49d4a82ef91021852710
+  - enabled: 1
+    path: Assets/Scenes/yn.unity
+    guid: 0ca71a42a5abc964bb2ed46d9ed2a94e
+  - enabled: 1
+    path: Assets/Scenes/enumeration.unity
+    guid: 273de7dfe93f9714d9698a2e971c3517
+  - enabled: 1
+    path: Assets/Scenes/essay.unity
+    guid: 3d4ebfa7d2f7b1e47af506670fa6c9f8
+  - enabled: 1
+    path: Assets/Scenes/identification.unity
+    guid: d10f6955960db494da97454c98fdc462
+  - enabled: 1
+    path: Assets/Scenes/historyScene.unity
+    guid: 339af9b93229a4c468dd1240dfd438a7
+  - enabled: 1
+    path: Assets/Scenes/feedBack.unity
+    guid: f45672345ec4094438f374d65c409b8a
+  - enabled: 1
+    path: Assets/Scenes/intro1.unity
+    guid: 4f43cea5d7742574aae4486e0d117107
+  - enabled: 1
+    path: Assets/Scenes/intro2.unity
+    guid: 469a543badaede6468060344e78cbe3c
+  - enabled: 1
+    path: Assets/Scenes/intro3.unity
+    guid: 11f2bae1b5555654abd70dca3b7363b2
+  m_configObjects:
+    com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 2bcd2660ca9b64942af0de543d8d7100, type: 3}
+  m_UseUCBPForAssetBundles: 0
