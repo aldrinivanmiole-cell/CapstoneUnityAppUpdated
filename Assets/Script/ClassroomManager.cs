@@ -1,89 +1,87 @@
+using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
-using UnityEngine.EventSystems;
 using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
-using System.Collections;
-using System.Collections.Generic;
-
-[System.Serializable]
-public class RoomUI
-{
-    public Image roomImage;
-    public TMP_Text roomText;
-    public int roomId;
-}
-
-[System.Serializable]
-public class ClassroomData
-{
-    public int room_no;
-    public int class_id;
-    public string description;
-}
-
-[System.Serializable]
-public class AssignmentTypeData
-{
-    public int category_id;
-    public string description;
-}
-
-[System.Serializable]
-public class ServerResponse
-{
-    public string status;
-    public string message;
-}
-
-public static class JsonUtilityWrapper
-{
-    public static List<T> FromJsonList<T>(string json)
-    {
-        Wrapper<T> wrapper = JsonUtility.FromJson<Wrapper<T>>("{\"items\":" + json + "}");
-        return wrapper.items;
-    }
-
-    [System.Serializable]
-    private class Wrapper<T>
-    {
-        public List<T> items;
-    }
-}
-
-public static class CurrentClassSession
-{
-    public static int SelectedClassId;
-    public static int SelectedCategoryId;
-}
+using UnityEngine.EventSystems;
 
 public class ClassroomManager : MonoBehaviour
 {
+    [System.Serializable]
+    public class RoomUI
+    {
+        public Image roomImage;
+        public TMP_Text roomText;
+        public int roomId;
+    }
+
+    [System.Serializable]
+    public class ClassroomData
+    {
+        public int room_no;
+        public int class_id;
+        public string description;
+    }
+
+    [System.Serializable]
+    public class AssignmentTypeData
+    {
+        public int category_id;
+        public string description;
+        public bool is_completed;
+    }
+
+    private class ClassroomListWrapper
+    {
+        public List<ClassroomData> classrooms;
+    }
+
+    private class AssignmentTypeListWrapper
+    {
+        public List<AssignmentTypeData> categories;
+    }
+
+    [Header("Classroom Entry UI (Submit/QR Buttons)")]
+    public TMP_InputField entryCodeInput;
+    public Button submitButton;
+    public Button scanQRButton;
+
+    [Header("Rooms (r1–r12)")]
+    public List<RoomUI> rooms = new List<RoomUI>();
+
     [Header("Panels")]
-    public GameObject stagePanel;      // ✅ For selecting assignment types
-    public GameObject addClassPanel;   // ✅ For adding classroom via code
-    public GameObject noQuestionPanel; // ✅ For no assignments found
+    public GameObject stagePanel;
+    public GameObject addClassPanel;
+    public GameObject noQuestionPanel;
 
     [Header("Add Class Panel UI")]
-    public TMP_InputField codeInput;
+    public TMP_InputField classCodeInput;
     public Button joinClassButton;
+
+    [Header("Stage Panel UI")]
+    public Transform categoryButtonContainer;  // The container inside scroll view for buttons
+    public GameObject categoryButtonPrefab;    // Prefab for creating assignment buttons dynamically
+    public Button exitButton;                  // Button to close the assignment panel
+    
+    // Keep these for backward compatibility (optional, can be removed later)
+    public Button alchemyButton;               // Alchemy = True/False gameplay
+    public Button identificationButton;
+    public Button multipleChoiceButton;        // Multiple Choice = Treasure Hunt/Indiana Jones
+    
+    private List<GameObject> spawnedButtons = new List<GameObject>();
+
+    [Header("Warning & Error")]
     public TMP_Text warningText;
 
-    [Header("Assignment Category UI")]
-    public Transform categoryButtonContainer; 
-    public GameObject categoryButtonPrefab;
-
-    [Header("Rooms (r1–r10)")]
-    public List<RoomUI> rooms;
-
-    private int selectedRoomId;
-    private int selectedClassId;
+    private string baseUrl = "https://homequest-c3k7.onrender.com/";
     private int studentId;
+    private int currentClassId;
+    private int selectedRoomId;
+    private string selectedAssignmentType = ""; // Store the type of selected assignment
 
-    private string baseUrl = "https://homeworkquest.site/";
-
-    private Dictionary<int, int> roomClassMap = new Dictionary<int, int>();
+    private Dictionary<int, ClassroomData> classroomDataByRoom = new Dictionary<int, ClassroomData>();
 
     void Start()
     {
@@ -100,13 +98,28 @@ public class ClassroomManager : MonoBehaviour
             return;
         }
 
-        // Panels setup
-        stagePanel.SetActive(false);
-        addClassPanel.SetActive(false);
-        noQuestionPanel.SetActive(false);
+        if (stagePanel != null) stagePanel.SetActive(false);
+        if (addClassPanel != null) addClassPanel.SetActive(false);
+        if (noQuestionPanel != null) noQuestionPanel.SetActive(false);
         if (warningText != null) warningText.gameObject.SetActive(false);
 
-        joinClassButton.onClick.AddListener(OnJoinClassClicked);
+        // Auto-uppercase for class code input
+        if (classCodeInput != null)
+        {
+            classCodeInput.onValueChanged.AddListener(ConvertToUppercase);
+            classCodeInput.characterValidation = TMP_InputField.CharacterValidation.Alphanumeric;
+        }
+
+        // Setup Submit and QR button listeners
+        if (submitButton != null)
+            submitButton.onClick.AddListener(OnSubmitClassCode);
+
+        if (scanQRButton != null)
+            scanQRButton.onClick.AddListener(OnScanQR);
+        if (exitButton != null)
+            exitButton.onClick.AddListener(OnExitButtonClicked);
+        if (joinClassButton != null)
+            joinClassButton.onClick.AddListener(OnJoinClassClicked);
 
         foreach (var room in rooms)
             AddClickListener(room.roomImage, room.roomId);
@@ -114,15 +127,14 @@ public class ClassroomManager : MonoBehaviour
         StartCoroutine(LoadRoomAssignments());
     }
 
-    void AddClickListener(Image img, int roomId)
+    void AddClickListener(Image roomImage, int roomId)
     {
-        EventTrigger trigger = img.GetComponent<EventTrigger>();
-        if (trigger == null) trigger = img.gameObject.AddComponent<EventTrigger>();
+        EventTrigger trigger = roomImage.gameObject.GetComponent<EventTrigger>();
+        if (trigger == null)
+            trigger = roomImage.gameObject.AddComponent<EventTrigger>();
 
-        EventTrigger.Entry entry = new EventTrigger.Entry
-        {
-            eventID = EventTriggerType.PointerClick
-        };
+        EventTrigger.Entry entry = new EventTrigger.Entry();
+        entry.eventID = EventTriggerType.PointerClick;
         entry.callback.AddListener((data) => { OnRoomClicked(roomId); });
         trigger.triggers.Add(entry);
     }
@@ -130,74 +142,228 @@ public class ClassroomManager : MonoBehaviour
     void OnRoomClicked(int roomId)
     {
         selectedRoomId = roomId;
-        var room = rooms.Find(r => r.roomId == roomId);
-        if (room == null) return;
 
-        // If the classroom slot is filled → show assignment picker
-        if (!string.IsNullOrEmpty(room.roomText.text) && room.roomText.text != "Empty")
+        if (classroomDataByRoom.ContainsKey(roomId))
         {
-            selectedClassId = roomClassMap.ContainsKey(roomId) ? roomClassMap[roomId] : 0;
-            Debug.Log("Selected Room " + roomId + " → Class ID " + selectedClassId);
-
-            if (selectedClassId > 0)
-            {
-                StartCoroutine(LoadAssignmentTypes(selectedClassId));
-            }
+            ClassroomData classroom = classroomDataByRoom[roomId];
+            currentClassId = classroom.class_id;
+            StartCoroutine(LoadAssignmentTypes(currentClassId));
         }
         else
         {
-            // If room is empty → show AddClassPanel
-            addClassPanel.SetActive(true);
-            codeInput.text = "";
-            if (warningText != null) warningText.gameObject.SetActive(false);
+            if (addClassPanel != null) addClassPanel.SetActive(true);
+        }
+    }
+
+    void OnJoinClassClicked()
+    {
+        string code = classCodeInput.text.Trim();
+        if (string.IsNullOrEmpty(code))
+        {
+            Debug.LogWarning("Class code is empty!");
+            return;
+        }
+
+        StartCoroutine(SaveClassroom(selectedRoomId, code));
+    }
+
+    /// <summary>
+    /// Called when Submit button is clicked (bottom of ClassRooms panel)
+    /// </summary>
+    void OnSubmitClassCode()
+    {
+        if (entryCodeInput == null || string.IsNullOrEmpty(entryCodeInput.text))
+        {
+            Debug.LogWarning("⚠️ Please enter a class code!");
+            if (warningText != null)
+            {
+                warningText.text = "Please enter a class code";
+                warningText.gameObject.SetActive(true);
+                StartCoroutine(HideWarningAfterDelay(3f));
+            }
+            return;
+        }
+
+        string code = entryCodeInput.text.Trim();
+        Debug.Log($"🔑 Joining class with code: {code}");
+
+        // Find first empty room
+        int emptyRoomId = FindFirstEmptyRoom();
+        if (emptyRoomId == -1)
+        {
+            Debug.LogWarning("⚠️ All rooms are full!");
+            if (warningText != null)
+            {
+                warningText.text = "All rooms are full! Please remove a class first.";
+                warningText.gameObject.SetActive(true);
+                StartCoroutine(HideWarningAfterDelay(3f));
+            }
+            return;
+        }
+
+        // Join the classroom in the first empty room
+        StartCoroutine(SaveClassroom(emptyRoomId, code));
+    }
+
+    /// <summary>
+    /// Called when Scan QR button is clicked
+    /// </summary>
+    void OnScanQR()
+    {
+        Debug.Log("📷 Opening QR Scanner...");
+
+#if UNITY_EDITOR
+        // Test mode in Unity Editor
+        Debug.Log("🧪 EDITOR MODE: Using test code 'TEST123'");
+        int emptyRoomId = FindFirstEmptyRoom();
+        if (emptyRoomId == -1)
+        {
+            Debug.LogWarning("⚠️ All rooms are full!");
+            if (warningText != null)
+            {
+                warningText.text = "All rooms are full!";
+                warningText.gameObject.SetActive(true);
+                StartCoroutine(HideWarningAfterDelay(3f));
+            }
+            return;
+        }
+        StartCoroutine(SaveClassroom(emptyRoomId, "TEST123"));
+#else
+        // Production mode - implement actual QR scanner
+        // TODO: Add ZXing or similar QR scanner plugin
+        StartQRScanner();
+#endif
+    }
+
+    /// <summary>
+    /// Start QR code scanner (requires QR scanner plugin like ZXing)
+    /// </summary>
+    void StartQRScanner()
+    {
+        // TODO: Implement with QR scanner plugin
+        // Example with ZXing:
+        /*
+        QRCodeReader reader = new QRCodeReader();
+        reader.OnQRCodeScanned += (scannedCode) => {
+            Debug.Log($"📷 Scanned QR Code: {scannedCode}");
+            int emptyRoomId = FindFirstEmptyRoom();
+            if (emptyRoomId != -1)
+            {
+                StartCoroutine(SaveClassroom(emptyRoomId, scannedCode));
+            }
+        };
+        reader.StartScanning();
+        */
+
+        Debug.LogWarning("⚠️ QR Scanner not implemented yet. Add ZXing or similar plugin.");
+        if (warningText != null)
+        {
+            warningText.text = "QR Scanner not available yet";
+            warningText.gameObject.SetActive(true);
+            StartCoroutine(HideWarningAfterDelay(3f));
+        }
+    }
+
+    /// <summary>
+    /// Find the first empty room slot
+    /// </summary>
+    int FindFirstEmptyRoom()
+    {
+        for (int i = 1; i <= rooms.Count; i++)
+        {
+            if (!classroomDataByRoom.ContainsKey(i))
+            {
+                Debug.Log($"✅ Found empty room: r{i}");
+                return i;
+            }
+        }
+        return -1; // All rooms are full
+    }
+
+    IEnumerator SaveClassroom(int roomNo, string classCode)
+    {
+        WWWForm form = new WWWForm();
+        form.AddField("student_id", studentId);
+        form.AddField("room_no", roomNo);
+        form.AddField("code", classCode);  // Backend expects "code" not "class_code"
+
+        using (UnityWebRequest request = UnityWebRequest.Post(baseUrl + "save_classroom", form))
+        {
+            yield return request.SendWebRequest();
+
+            if (request.result != UnityWebRequest.Result.Success)
+            {
+                string errorMsg = request.error;
+                string responseText = request.downloadHandler.text;
+                Debug.LogError($"Error saving classroom: {errorMsg}");
+                Debug.LogError($"Server response: {responseText}");
+                Debug.LogError($"Data sent - student_id: {studentId}, room_no: {roomNo}, class_code: {classCode}");
+                
+                if (warningText != null)
+                {
+                    warningText.text = "Failed to join class. Check code.";
+                    warningText.gameObject.SetActive(true);
+                    StartCoroutine(HideWarningAfterDelay(3f));
+                }
+            }
+            else
+            {
+                Debug.Log("✅ Classroom saved successfully!");
+                
+                // Clear input fields
+                if (classCodeInput != null) classCodeInput.text = "";
+                if (entryCodeInput != null) entryCodeInput.text = "";
+                
+                if (addClassPanel != null) addClassPanel.SetActive(false);
+                StartCoroutine(LoadRoomAssignments());
+            }
         }
     }
 
     IEnumerator LoadRoomAssignments()
     {
-        using (UnityWebRequest www = UnityWebRequest.Get(baseUrl + "get_classrooms.php?student_id=" + studentId))
-        {
-            yield return www.SendWebRequest();
+        string url = baseUrl + "get_classrooms?student_id=" + studentId;
 
-            if (www.result != UnityWebRequest.Result.Success)
+        using (UnityWebRequest request = UnityWebRequest.Get(url))
+        {
+            yield return request.SendWebRequest();
+
+            if (request.result != UnityWebRequest.Result.Success)
             {
-                Debug.LogError("Error loading classrooms: " + www.error);
+                Debug.LogError("Error loading classrooms: " + request.error);
             }
             else
             {
-                string json = www.downloadHandler.text;
-                Debug.Log("Classroom JSON: " + json);
+                string jsonResponse = request.downloadHandler.text;
+                Debug.Log("Classrooms JSON: " + jsonResponse);
 
-                List<ClassroomData> classroomList = JsonUtilityWrapper.FromJsonList<ClassroomData>(json);
-                roomClassMap.Clear();
+                // Parse the JSON array
+                List<ClassroomData> classroomList = JsonUtilityWrapper.FromJsonList<ClassroomData>(jsonResponse);
 
-                bool hasClassroom = false;
+                classroomDataByRoom.Clear();
 
                 foreach (var room in rooms)
                 {
-                    var assigned = classroomList.Find(c => c.room_no == room.roomId);
-                    if (assigned != null)
-                    {
-                        room.roomText.text = assigned.description ?? "Unknown";
-                        roomClassMap[room.roomId] = assigned.class_id;
-                        hasClassroom = true;
-                    }
-                    else
-                    {
-                        room.roomText.text = "";
-                    }
+                    room.roomText.text = "";
+                    room.roomImage.color = new Color(0.8f, 0.8f, 0.8f);
                 }
 
-                // ✅ If student has no classes, automatically open AddClassPanel
-                if (!hasClassroom)
+                if (classroomList != null && classroomList.Count > 0)
                 {
-                    addClassPanel.SetActive(false);
-                    codeInput.text = "";
-                    if (warningText != null) warningText.gameObject.SetActive(false);
-                }
-                else
-                {
-                    addClassPanel.SetActive(false);
+                    Debug.Log($"📚 Found {classroomList.Count} classrooms");
+                    foreach (var classroom in classroomList)
+                    {
+                        Debug.Log($"📖 Classroom - room_no: {classroom.room_no}, class_id: {classroom.class_id}, description: {classroom.description}");
+                        classroomDataByRoom[classroom.room_no] = classroom;
+
+                        RoomUI roomUI = rooms.Find(r => r.roomId == classroom.room_no);
+                        Debug.Log($"🔍 Looking for room with ID {classroom.room_no}, found: {(roomUI != null ? "YES" : "NO")}");
+                        if (roomUI != null)
+                        {
+                            roomUI.roomText.text = classroom.description;
+                            roomUI.roomImage.color = Color.white;
+                        }
+                    }
                 }
             }
         }
@@ -205,128 +371,239 @@ public class ClassroomManager : MonoBehaviour
 
     IEnumerator LoadAssignmentTypes(int classId)
     {
-        string url = baseUrl + "get_assignment_types.php?class_id=" + classId;
-        using (UnityWebRequest www = UnityWebRequest.Get(url))
-        {
-            yield return www.SendWebRequest();
+        string url = baseUrl + "get_assignment_types?student_id=" + studentId + "&class_id=" + classId;
 
-            if (www.result != UnityWebRequest.Result.Success)
+        using (UnityWebRequest request = UnityWebRequest.Get(url))
+        {
+            yield return request.SendWebRequest();
+
+            if (request.result != UnityWebRequest.Result.Success)
             {
-                Debug.LogError("Error loading assignment types: " + www.error);
+                Debug.LogError("Error loading assignment types: " + request.error);
             }
             else
             {
-                string json = www.downloadHandler.text;
-                Debug.Log("Assignment types JSON: " + json);
+                string jsonResponse = request.downloadHandler.text;
+                Debug.Log("Assignment Types JSON: " + jsonResponse);
 
-                List<AssignmentTypeData> types = JsonUtilityWrapper.FromJsonList<AssignmentTypeData>(json);
+                // Parse the JSON array
+                List<AssignmentTypeData> categoryList = JsonUtilityWrapper.FromJsonList<AssignmentTypeData>(jsonResponse);
+                Debug.Log($"📋 Parsed {(categoryList != null ? categoryList.Count : 0)} assignment types");
 
-                foreach (Transform child in categoryButtonContainer)
-                    Destroy(child.gameObject);
-
-                if (types.Count > 0)
+                if (categoryList != null && categoryList.Count > 0)
                 {
-                    stagePanel.SetActive(true);
-                    addClassPanel.SetActive(false);
-                    noQuestionPanel.SetActive(false);
+                    if (stagePanel != null) stagePanel.SetActive(true);
 
-                    foreach (var type in types)
+                    // Clear any previously spawned buttons
+                    ClearSpawnedButtons();
+                    
+                    // Use dynamic button spawning if container and prefab are set
+                    if (categoryButtonContainer != null && categoryButtonPrefab != null)
                     {
-                        GameObject btnObj = Instantiate(categoryButtonPrefab, categoryButtonContainer);
-                        TMP_Text label = btnObj.GetComponentInChildren<TMP_Text>();
-                        label.text = type.description;
-
-                        Button btn = btnObj.GetComponent<Button>();
-                        int categoryId = type.category_id;
-                        string categoryName = type.description;
-
-                        btn.onClick.AddListener(() =>
+                        foreach (var category in categoryList)
                         {
-                            OnCategorySelected(categoryId, categoryName);
-                        });
+                            Debug.Log($"📝 Assignment: {category.description}, ID: {category.category_id}");
+                            
+                            // Determine assignment type
+                            string assignmentType = GetAssignmentType(category.description);
+                            if (string.IsNullOrEmpty(assignmentType)) continue;
+                            
+                            // Create button from prefab
+                            GameObject buttonObj = Instantiate(categoryButtonPrefab, categoryButtonContainer);
+                            buttonObj.SetActive(true);
+                            spawnedButtons.Add(buttonObj);
+                            
+                            // Setup button text
+                            TMP_Text buttonText = buttonObj.GetComponentInChildren<TMP_Text>();
+                            if (buttonText != null)
+                            {
+                                buttonText.text = category.description.ToUpper();
+                            }
+                            
+                            // Color-code button by assignment type
+                            Image buttonImage = buttonObj.GetComponent<Image>();
+                            if (buttonImage != null)
+                            {
+                                if (assignmentType == "Alchemy")
+                                    buttonImage.color = new Color(0.4f, 0.85f, 0.4f); // Green for True/False
+                                else if (assignmentType == "MultipleChoice")
+                                    buttonImage.color = new Color(1f, 0.75f, 0.3f); // Gold for Multiple Choice
+                                else if (assignmentType == "Identification")
+                                    buttonImage.color = new Color(0.4f, 0.7f, 1f); // Blue for Identification
+                            }
+                            
+                            // Setup button click event
+                            Button button = buttonObj.GetComponent<Button>();
+                            if (button != null)
+                            {
+                                int capturedCategoryId = category.category_id;
+                                string capturedType = assignmentType;
+                                button.onClick.AddListener(() => OnCategorySelected(capturedCategoryId, capturedType));
+                            }
+                        }
                     }
-                }
-                else
-                {
-                    stagePanel.SetActive(false);
-                    noQuestionPanel.SetActive(true);
-                    Debug.Log("No assignments available for this class.");
-                }
-            }
-        }
-    }
-
-    void OnJoinClassClicked()
-    {
-        string code = codeInput.text.Trim();
-        if (string.IsNullOrEmpty(code))
-        {
-            if (warningText != null)
-            {
-                warningText.text = "Please enter a class code.";
-                warningText.gameObject.SetActive(true);
-            }
-            return;
-        }
-
-        StartCoroutine(SaveClassroom(studentId, code, selectedRoomId));
-    }
-
-    IEnumerator SaveClassroom(int studentId, string code, int roomId)
-    {
-        WWWForm form = new WWWForm();
-        form.AddField("student_id", studentId);
-        form.AddField("code", code);
-        form.AddField("room_no", roomId);
-
-        using (UnityWebRequest www = UnityWebRequest.Post(baseUrl + "save_classroom.php", form))
-        {
-            yield return www.SendWebRequest();
-
-            if (www.result != UnityWebRequest.Result.Success)
-            {
-                Debug.LogError("Error: " + www.error);
-            }
-            else
-            {
-                var response = JsonUtility.FromJson<ServerResponse>(www.downloadHandler.text);
-                if (response.status == "success")
-                {
-                    Debug.Log(response.message);
-                    addClassPanel.SetActive(false);
-                    StartCoroutine(LoadRoomAssignments());
-                }
-                else
-                {
-                    if (warningText != null)
+                    else
                     {
-                        warningText.text = response.message;
-                        warningText.gameObject.SetActive(true);
+                        // Fallback to old system if container/prefab not set
+                        UseOldButtonSystem(categoryList);
                     }
+                }
+                else
+                {
+                    if (noQuestionPanel != null) noQuestionPanel.SetActive(true);
                 }
             }
         }
     }
 
-    void OnCategorySelected(int categoryId, string categoryName)
+    void OnCategorySelected(int assignmentId, string assignmentType)
     {
-        Debug.Log($"Selected Category: {categoryName} (ID: {categoryId}) for Class: {selectedClassId}");
+        // Set session data
+        CurrentClassSession.SelectedClassId = currentClassId;
+        CurrentClassSession.SelectedCategoryId = assignmentId;
 
-        CurrentClassSession.SelectedClassId = selectedClassId;
-        CurrentClassSession.SelectedCategoryId = categoryId;
+        // Also save to PlayerPrefs for backward compatibility
+        PlayerPrefs.SetInt("CategoryId", assignmentId);
+        PlayerPrefs.SetInt("ClassId", currentClassId);
+        PlayerPrefs.Save();
 
-        switch (categoryName)
+        Debug.Log($"🎯 Selected assignment ID: {assignmentId}, Type: {assignmentType}");
+
+        // Load scene based on assignment type
+        if (assignmentType == "Alchemy")
+            SceneManager.LoadScene("Alchemy");  // Alchemy is True/False gameplay
+        else if (assignmentType == "Identification")
+            SceneManager.LoadScene("Identification");
+        else if (assignmentType == "MultipleChoice")
+            SceneManager.LoadScene("MC-Opening");  // Multiple Choice opening scene (Treasure Hunt/Indiana Jones)
+    }
+
+    IEnumerator HideWarningAfterDelay(float delay)
+    {
+        yield return new WaitForSeconds(delay);
+        if (warningText != null)
+            warningText.gameObject.SetActive(false);
+    }
+
+    void OnExitButtonClicked()
+    {
+        Debug.Log("🚪 Exit button clicked - closing assignment panel");
+        
+        // Hide stage panel
+        if (stagePanel != null)
+            stagePanel.SetActive(false);
+        
+        // Clear spawned buttons
+        ClearSpawnedButtons();
+        
+        // Optionally: Show classroom view or go back to map
+        // SceneManager.LoadScene("NEWMAP");
+    }
+
+    void ConvertToUppercase(string input)
+    {
+        if (classCodeInput != null && !string.IsNullOrEmpty(input))
         {
-            case "Problem Solving": SceneManager.LoadScene("ps"); break;
-            case "Multiple Choice": SceneManager.LoadScene("mc"); break;
-            case "True/False": SceneManager.LoadScene("yn"); break;
-            case "Fill in the Blank": SceneManager.LoadScene("fib"); break;
-            case "Identification": SceneManager.LoadScene("identification"); break;
-            case "Enumeration": SceneManager.LoadScene("enumeration"); break;
-            case "Essay": SceneManager.LoadScene("essay"); break;
-            default:
-                Debug.LogWarning("No valid category scene matched.");
-                break;
+            string upperText = input.ToUpper();
+            if (classCodeInput.text != upperText)
+            {
+                classCodeInput.text = upperText;
+                classCodeInput.caretPosition = upperText.Length;
+            }
         }
+    }
+
+    void ClearSpawnedButtons()
+    {
+        foreach (GameObject btn in spawnedButtons)
+        {
+            if (btn != null) Destroy(btn);
+        }
+        spawnedButtons.Clear();
+    }
+
+    string GetAssignmentType(string description)
+    {
+        if (description.Contains("True") || description.Contains("False"))
+            return "Alchemy";
+        else if (description.Contains("Identification"))
+            return "Identification";
+        else if (description.Contains("Multiple Choice"))
+            return "MultipleChoice";
+        return "";
+    }
+
+    void UseOldButtonSystem(List<AssignmentTypeData> categoryList)
+    {
+        if (alchemyButton != null)
+            alchemyButton.onClick.RemoveAllListeners();
+        if (identificationButton != null)
+            identificationButton.onClick.RemoveAllListeners();
+        if (multipleChoiceButton != null)
+            multipleChoiceButton.onClick.RemoveAllListeners();
+
+        // Hide all buttons first
+        if (alchemyButton != null) alchemyButton.gameObject.SetActive(false);
+        if (identificationButton != null) identificationButton.gameObject.SetActive(false);
+        if (multipleChoiceButton != null) multipleChoiceButton.gameObject.SetActive(false);
+        
+        foreach (var category in categoryList)
+        {
+            int capturedCategoryId = category.category_id;
+            
+            if (category.description.Contains("True") || category.description.Contains("False"))
+            {
+                if (alchemyButton != null)
+                {
+                    alchemyButton.gameObject.SetActive(true);
+                    alchemyButton.onClick.AddListener(() => OnCategorySelected(capturedCategoryId, "Alchemy"));
+                }
+            }
+            else if (category.description.Contains("Identification"))
+            {
+                if (identificationButton != null)
+                {
+                    identificationButton.gameObject.SetActive(true);
+                    identificationButton.onClick.AddListener(() => OnCategorySelected(capturedCategoryId, "Identification"));
+                }
+            }
+            else if (category.description.Contains("Multiple Choice"))
+            {
+                if (multipleChoiceButton != null)
+                {
+                    multipleChoiceButton.gameObject.SetActive(true);
+                    multipleChoiceButton.onClick.AddListener(() => OnCategorySelected(capturedCategoryId, "MultipleChoice"));
+                }
+            }
+        }
+    }
+}
+
+public static class CurrentClassSession
+{
+    public static int SelectedClassId { get; set; }
+    public static int SelectedCategoryId { get; set; }
+}
+
+public static class JsonUtilityWrapper
+{
+    public static T FromJson<T>(string json)
+    {
+        string wrappedJson = "{\"items\":" + json + "}";
+        Wrapper<T> wrapper = JsonUtility.FromJson<Wrapper<T>>(wrappedJson);
+        return wrapper.items;
+    }
+
+    public static List<T> FromJsonList<T>(string json)
+    {
+        string wrappedJson = "{\"items\":" + json + "}";
+        Wrapper<List<T>> wrapper = JsonUtility.FromJson<Wrapper<List<T>>>(wrappedJson);
+        return wrapper.items;
+    }
+
+    [System.Serializable]
+    private class Wrapper<T>
+    {
+        public T items;
     }
 }

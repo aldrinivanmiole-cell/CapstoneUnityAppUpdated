@@ -5,6 +5,16 @@ using UnityEngine.Networking;
 using UnityEngine.UI;
 using UnityEngine.SceneManagement; // 👈 Needed for scene loading
 
+[System.Serializable]
+public class RegisterResponse
+{
+    public string status;
+    public string id;
+    public string username;
+    public string gender;
+    public string message;
+}
+
 public class RegisterStudent : MonoBehaviour
 {
     [Header("Input Fields")]
@@ -21,7 +31,7 @@ public class RegisterStudent : MonoBehaviour
     public GameObject successPanel; // 👈 optional: show success before switching
 
     [Header("Server URL")]
-    public string registerURL = "https://homeworkquest.site/registers.php"; // 👈 change this to your actual PHP file
+    public string registerURL = "https://homequest-c3k7.onrender.com/register"; // Flask API endpoint
 
     [Header("Scene Settings")]
     public string loginSceneName = "login"; // 👈 your login scene name
@@ -78,21 +88,31 @@ public class RegisterStudent : MonoBehaviour
             {
                 string response = www.downloadHandler.text.Trim();
 
-                if (response == "SUCCESS")
+                // Parse JSON response
+                try
                 {
-                    Debug.Log("✅ Registration successful!");
-                    if (successPanel != null)
-                        StartCoroutine(ShowSuccessAndGoToLogin());
+                    var jsonResponse = JsonUtility.FromJson<RegisterResponse>(response);
+                    
+                    if (jsonResponse.status == "SUCCESS")
+                    {
+                        Debug.Log("✅ Registration successful!");
+                        if (successPanel != null)
+                            StartCoroutine(ShowSuccessAndGoToLogin());
+                    }
+                    else if (jsonResponse.status == "EXISTS")
+                    {
+                        Debug.LogWarning("⚠️ Username already exists.");
+                        if (accountExistsPanel != null)
+                            StartCoroutine(ShowPanelForSeconds(accountExistsPanel, 2f));
+                    }
+                    else
+                    {
+                        Debug.LogError("❌ Registration failed: " + jsonResponse.message);
+                    }
                 }
-                else if (response == "EXISTS")
+                catch (System.Exception e)
                 {
-                    Debug.LogWarning("⚠️ Username already exists.");
-                    if (accountExistsPanel != null)
-                        StartCoroutine(ShowPanelForSeconds(accountExistsPanel, 2f));
-                }
-                else
-                {
-                    Debug.LogError("❌ Registration failed: " + response);
+                    Debug.LogError("❌ Failed to parse response: " + e.Message + "\nResponse: " + response);
                 }
             }
         }
@@ -113,7 +133,7 @@ public class RegisterStudent : MonoBehaviour
             yield return new WaitForSeconds(1.5f);
         }
 
-        // Load login scene after short delay
-        SceneManager.LoadScene(loginSceneName);
+        // Go to login scene after successful registration
+        SceneManager.LoadScene("login");
     }
 }

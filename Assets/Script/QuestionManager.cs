@@ -58,7 +58,7 @@ public class QuestionManager : MonoBehaviour
 
     IEnumerator LoadQuestions()
     {
-        using (UnityWebRequest www = UnityWebRequest.Get("https://homeworkquest.site/get_questions.php?student_id=" + studentId))
+        using (UnityWebRequest www = UnityWebRequest.Get("https://homequest-c3k7.onrender.com/get_questions?student_id=" + studentId))
         {
             yield return www.SendWebRequest();
 
@@ -122,15 +122,18 @@ public class QuestionManager : MonoBehaviour
 
     IEnumerator SaveScore()
     {
-        finishPanel.SetActive(true);
-        scoreText.text = $"You got {correctCount} / {questions.Count} correct!";
+        // Calculate percentage score for trophy system
+        int percentageScore = (questions.Count > 0) ? (correctCount * 100) / questions.Count : 0;
+        PlayerPrefs.SetInt("PlayerScore", percentageScore);
+        PlayerPrefs.Save();
+        Debug.Log($"✅ Score saved to PlayerPrefs: {percentageScore}%");
 
         WWWForm form = new WWWForm();
         form.AddField("student_id", studentId);
         form.AddField("classes_id", classesId);
         form.AddField("score", correctCount);
 
-        using (UnityWebRequest www = UnityWebRequest.Post("https://homeworkquest.site/submit_score.php", form))
+        using (UnityWebRequest www = UnityWebRequest.Post("https://homequest-c3k7.onrender.com/submit_score", form))
         {
             yield return www.SendWebRequest();
 
@@ -144,5 +147,9 @@ public class QuestionManager : MonoBehaviour
                 Debug.Log("Score saved: " + response.message);
             }
         }
+
+        // Wait 5 seconds then navigate to gameresult scene
+        yield return new WaitForSeconds(5f);
+        SceneManager.LoadScene("gameresult");
     }
 }

@@ -30,7 +30,7 @@ public class ViewFeedbackReplies : MonoBehaviour
     public TMP_Text titleText;
 
     [Header("Server")]
-    public string getFeedbackUrl = "https://homeworkquest.site/get_feedback_reply.php";
+    public string getFeedbackUrl = "https://homequest-c3k7.onrender.com/get_feedback_reply";
 
     private int studentId;
 

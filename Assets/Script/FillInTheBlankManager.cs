@@ -4,6 +4,7 @@ using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using UnityEngine.Networking;
+using UnityEngine.SceneManagement;
 
 [System.Serializable]
 public class FIBAnswer
@@ -16,6 +17,7 @@ public class FIBAnswer
 public class FIBQuestion
 {
     public int id;
+    public int assignment_id;
     public string question_description;
     public List<FIBAnswer> answers;
 }
@@ -34,6 +36,7 @@ public class FillInTheBlankManager : MonoBehaviour
     private int currentIndex = 0;
     private int correctCount = 0;
     private int studentId;
+    private int assignmentId;
 
     void Start()
     {
@@ -52,7 +55,9 @@ public class FillInTheBlankManager : MonoBehaviour
 
     IEnumerator LoadFIBQuestions()
     {
-        using (UnityWebRequest www = UnityWebRequest.Get("https://homeworkquest.site/get_fib.php?student_id=" + studentId))
+        assignmentId = CurrentClassSession.SelectedCategoryId; // This is the assignment ID
+        string url = $"https://homequest-c3k7.onrender.com/get_fib?student_id={studentId}&assignment_id={assignmentId}";
+        using (UnityWebRequest www = UnityWebRequest.Get(url))
         {
             yield return www.SendWebRequest();
 
@@ -82,7 +87,11 @@ public class FillInTheBlankManager : MonoBehaviour
                 }
 
                 if (questions.Count > 0)
+                {
+                    assignmentId = questions[0].assignment_id;
+                    Debug.Log("Assignment ID: " + assignmentId);
                     ShowQuestion();
+                }
                 else
                     Debug.LogWarning("No Fill in the Blank questions found.");
             }
@@ -114,20 +123,46 @@ public class FillInTheBlankManager : MonoBehaviour
 
         var q = questions[currentIndex];
         bool isCorrect = false;
-        string correctAnswer = "";
+        List<string> correctAnswers = new List<string>();
 
-        // ✅ Check against correct answers
+        // Collect all correct answers
         foreach (var ans in q.answers)
         {
             if (ans.correct_answer == 1)
-                correctAnswer = ans.answer_description;
+                correctAnswers.Add(ans.answer_description);
+        }
 
-            if (ans.correct_answer == 1 &&
-                userAnswer.Equals(ans.answer_description, System.StringComparison.OrdinalIgnoreCase))
+        string correctAnswerText = string.Join(", ", correctAnswers);
+
+        // Check if user answer matches
+        // Support comma-separated answers for multiple blanks
+        if (correctAnswers.Count > 1)
+        {
+            // Multiple blanks - split user answer by comma
+            string[] userAnswerParts = userAnswer.Split(new[] { ',', '|' }, System.StringSplitOptions.RemoveEmptyEntries);
+            
+            // Trim each part
+            for (int i = 0; i < userAnswerParts.Length; i++)
+                userAnswerParts[i] = userAnswerParts[i].Trim();
+
+            // Check if all parts match (in order)
+            if (userAnswerParts.Length == correctAnswers.Count)
             {
                 isCorrect = true;
-                break;
+                for (int i = 0; i < userAnswerParts.Length; i++)
+                {
+                    if (!userAnswerParts[i].Equals(correctAnswers[i], System.StringComparison.OrdinalIgnoreCase))
+                    {
+                        isCorrect = false;
+                        break;
+                    }
+                }
             }
+        }
+        else if (correctAnswers.Count == 1)
+        {
+            // Single blank - direct comparison
+            isCorrect = userAnswer.Equals(correctAnswers[0], System.StringComparison.OrdinalIgnoreCase);
         }
 
         if (isCorrect)
@@ -139,12 +174,21 @@ public class FillInTheBlankManager : MonoBehaviour
             q.id,
             q.question_description,
             userAnswer,
-            correctAnswer,
+            correctAnswerText,
             isCorrect ? 1 : 0
         ));
 
+        // Show feedback
+        StartCoroutine(ShowFeedbackAndContinue(isCorrect));
+    }
+
+    IEnumerator ShowFeedbackAndContinue(bool isCorrect)
+    {
+        Debug.Log(isCorrect ? "✓ Answer was CORRECT!" : "✗ Answer was INCORRECT!");
+
         currentIndex++;
         ShowQuestion();
+        yield break;
     }
 
     // ✅ New: Save each answer to `history` table
@@ -152,14 +196,14 @@ public class FillInTheBlankManager : MonoBehaviour
     {
         WWWForm form = new WWWForm();
         form.AddField("student_id", studentId);
+        form.AddField("assignment_id", assignmentId);
         form.AddField("question_id", questionId);
-        form.AddField("question_description", question);
-        form.AddField("player_answer", playerAnswer);
+        form.AddField("question_text", question);
+        form.AddField("student_answer", playerAnswer);
         form.AddField("correct_answer", correctAnswer);
         form.AddField("is_correct", isCorrect);
-        form.AddField("assignment_type", "Fill in the Blank");
 
-        using (UnityWebRequest www = UnityWebRequest.Post("https://homeworkquest.site/save_history.php", form))
+        using (UnityWebRequest www = UnityWebRequest.Post("https://homequest-c3k7.onrender.com/save_history", form))
         {
             yield return www.SendWebRequest();
 
@@ -172,17 +216,37 @@ public class FillInTheBlankManager : MonoBehaviour
 
     IEnumerator SaveScore()
     {
+        // Show finish panel with score
         finishPanel.SetActive(true);
-        scoreText.text = $"You answered {correctCount} / {questions.Count} correctly!";
+        
+        if (scoreText != null)
+        {
+            scoreText.text = $"You got {correctCount} out of {questions.Count} correct!";
+            scoreText.color = Color.white;
+            scoreText.fontSize = 36;
+            scoreText.gameObject.SetActive(true);
+        }
+        
+        Debug.Log($"Final Score: {correctCount}/{questions.Count}");
 
-        int assignmentId = (questions.Count > 0) ? questions[0].id : 0;
+        // Calculate percentage score for trophy system
+        int percentageScore = (questions.Count > 0) ? (correctCount * 100) / questions.Count : 0;
+        PlayerPrefs.SetInt("PlayerScore", percentageScore);
+        PlayerPrefs.Save();
+        Debug.Log($"✅ Score saved to PlayerPrefs: {percentageScore}%");
+
+        if (studentId <= 0 || assignmentId <= 0)
+        {
+            Debug.LogError("Cannot save score. Invalid student or assignment ID.");
+            yield break;
+        }
 
         WWWForm form = new WWWForm();
         form.AddField("student_id", studentId);
         form.AddField("assignment_id", assignmentId);
         form.AddField("score", correctCount);
 
-        using (UnityWebRequest www = UnityWebRequest.Post("https://homeworkquest.site/submit_score.php", form))
+        using (UnityWebRequest www = UnityWebRequest.Post("https://homequest-c3k7.onrender.com/submit_score", form))
         {
             yield return www.SendWebRequest();
 
@@ -191,5 +255,9 @@ public class FillInTheBlankManager : MonoBehaviour
             else
                 Debug.Log("✅ FIB Score saved successfully!");
         }
+
+        // Wait 5 seconds then navigate to gameresult scene
+        yield return new WaitForSeconds(5f);
+        SceneManager.LoadScene("gameresult");
     }
 }

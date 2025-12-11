@@ -5,7 +5,7 @@ using UnityEngine.UI;
 public class BackButton : MonoBehaviour
 {
     [Header("Scene to go back to")]
-    public string loginSceneName = ""; // Change to your login scene name
+    public string previousSceneName = "NEWMAP"; // Scene to go back to
 
     private Button backButton;
 
@@ -16,7 +16,7 @@ public class BackButton : MonoBehaviour
 
         if (backButton != null)
         {
-            backButton.onClick.AddListener(GoBackToLogin);
+            backButton.onClick.AddListener(GoBackToPreviousScene);
         }
         else
         {
@@ -24,9 +24,9 @@ public class BackButton : MonoBehaviour
         }
     }
 
-    public void GoBackToLogin()
+    public void GoBackToPreviousScene()
     {
-        Debug.Log("🔙 Going back to login scene...");
-        SceneManager.LoadScene(loginSceneName);
+        Debug.Log($"🔙 Going back to {previousSceneName} scene...");
+        SceneManager.LoadScene(previousSceneName);
     }
 }

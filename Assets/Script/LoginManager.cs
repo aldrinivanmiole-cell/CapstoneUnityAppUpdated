@@ -16,7 +16,7 @@ public class LoginManager : MonoBehaviour
     public GameObject loadingPanel; // optional - show while waiting
 
     [Header("Server")]
-    public string loginURL = "https://homeworkquest.site/login.php"; // <- change to your PHP login endpoint
+    public string loginURL = "https://homequest-c3k7.onrender.com/login"; // Flask API endpoint
 
     [Header("Scene")]
     public string afterLoginScene = "intro1"; // <- change to your scene name
@@ -57,6 +57,9 @@ public class LoginManager : MonoBehaviour
 
         using (UnityWebRequest www = UnityWebRequest.Post(loginURL, form))
         {
+            // Set timeout to 30 seconds
+            www.timeout = 30;
+            
             yield return www.SendWebRequest();
 
             if (loadingPanel != null) loadingPanel.SetActive(false);
@@ -64,7 +67,8 @@ public class LoginManager : MonoBehaviour
             if (www.result != UnityWebRequest.Result.Success)
             {
                 Debug.LogError("Network error: " + www.error);
-                ShowError("Network error: " + www.error);
+                Debug.LogError("Response Code: " + www.responseCode);
+                ShowError("Cannot connect to server. Please check your internet connection.");
             }
             else
             {
@@ -110,8 +114,9 @@ public class LoginManager : MonoBehaviour
                         SessionManager.Instance.SetSession(id, data.username, data.gender, true);
                     }
 
-                    // Optionally show success UI, then load next scene
-                    SceneManager.LoadScene(afterLoginScene);
+                    // Load unified video loading screen
+                    Debug.Log("Loading video loading screen");
+                    SceneManager.LoadScene("VideoLoadingScreen");
                 }
                 else
                 {

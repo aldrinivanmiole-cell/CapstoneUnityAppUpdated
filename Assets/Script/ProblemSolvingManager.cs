@@ -4,6 +4,7 @@ using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using UnityEngine.Networking;
+using UnityEngine.SceneManagement;
 
 [System.Serializable]
 public class PSAnswer
@@ -16,6 +17,7 @@ public class PSAnswer
 public class Problem
 {
     public int id;
+    public int assignment_id;
     public string question_description;
     public string tutorial_link; // ✅ Add tutorial link
     public List<PSAnswer> answers;
@@ -34,9 +36,10 @@ public class ProblemSolvingManager : MonoBehaviour
 
     private List<Problem> problems = new List<Problem>();
     private int currentIndex = 0;
-    private int correctCount = 0;
     private int studentId;
+    private int assignmentId;
     private string currentTutorialLink = ""; // ✅ Store current tutorial link
+    private Dictionary<int, string> studentAnswers = new Dictionary<int, string>(); // Store answers for submission
 
     void Start()
     {
@@ -49,7 +52,9 @@ public class ProblemSolvingManager : MonoBehaviour
 
     IEnumerator LoadProblems()
     {
-        using (UnityWebRequest www = UnityWebRequest.Get("https://homeworkquest.site/get_problems.php?student_id=" + studentId))
+        assignmentId = CurrentClassSession.SelectedCategoryId; // This is the assignment ID
+        string url = $"https://homequest-c3k7.onrender.com/get_problems?student_id={studentId}&assignment_id={assignmentId}";
+        using (UnityWebRequest www = UnityWebRequest.Get(url))
         {
             yield return www.SendWebRequest();
             if (www.result != UnityWebRequest.Result.Success)
@@ -62,7 +67,11 @@ public class ProblemSolvingManager : MonoBehaviour
             problems = JsonUtilityWrapper.FromJsonList<Problem>(json);
 
             if (problems.Count > 0)
+            {
+                assignmentId = problems[0].assignment_id;
+                Debug.Log("Assignment ID: " + assignmentId);
                 ShowProblem();
+            }
         }
     }
 
@@ -87,7 +96,7 @@ public class ProblemSolvingManager : MonoBehaviour
     void OpenTutorialLink()
     {
         if (!string.IsNullOrEmpty(currentTutorialLink))
-            Application.OpenURL(currentTutorialLink); // ✅ Open in browser
+            Application.OpenURL(currentTutorialLink);
     }
 
     void OnSubmitAnswer()
@@ -96,79 +105,72 @@ public class ProblemSolvingManager : MonoBehaviour
         if (string.IsNullOrEmpty(userAnswer)) return;
 
         var p = problems[currentIndex];
-        bool isCorrect = false;
-        string correctAnswer = "";
-
-        foreach (var ans in p.answers)
+        
+        // Store answer for submission - teacher will verify and grade manually
+        studentAnswers[p.id] = userAnswer;
+        
+        // Show finish panel temporarily with "Answer Submitted!" message
+        finishPanel.SetActive(true);
+        if (scoreText != null)
         {
-            if (ans.correct_answer == 1)
-                correctAnswer = ans.answer_description;
-
-            if (ans.correct_answer == 1 &&
-                userAnswer.Equals(ans.answer_description, System.StringComparison.OrdinalIgnoreCase))
-            {
-                correctCount++;
-                isCorrect = true;
-            }
+            scoreText.text = "Answer Submitted!";
+            scoreText.color = Color.white;
+            scoreText.fontSize = 36;
+            scoreText.gameObject.SetActive(true);
         }
-
-        StartCoroutine(SaveAnswerToHistory(
-            studentId,
-            p.id,
-            p.question_description,
-            userAnswer,
-            correctAnswer,
-            isCorrect ? 1 : 0
-        ));
-
+        
         currentIndex++;
-        ShowProblem();
+        
+        // Wait a moment then show next problem
+        StartCoroutine(ShowNextProblemDelayed());
     }
 
-    IEnumerator SaveAnswerToHistory(int studentId, int questionId, string question, string playerAnswer, string correctAnswer, int isCorrect)
+    IEnumerator ShowNextProblemDelayed()
     {
-        WWWForm form = new WWWForm();
-        form.AddField("student_id", studentId);
-        form.AddField("question_id", questionId);
-        form.AddField("question_description", question);
-        form.AddField("player_answer", playerAnswer);
-        form.AddField("correct_answer", correctAnswer);
-        form.AddField("is_correct", isCorrect);
-        form.AddField("assignment_type", "Problem Solving");
-
-        using (UnityWebRequest www = UnityWebRequest.Post("https://homeworkquest.site/save_history.php", form))
-        {
-            yield return www.SendWebRequest();
-            if (www.result != UnityWebRequest.Result.Success)
-                Debug.LogError("❌ Error saving history: " + www.error);
-            else
-                Debug.Log("✅ Saved to history: " + www.downloadHandler.text);
-        }
+        yield return new WaitForSeconds(3f);
+        
+        // Hide feedback panel
+        finishPanel.SetActive(false);
+            
+        ShowProblem();
     }
 
     IEnumerator SaveScore()
     {
-        finishPanel.SetActive(true);
-        scoreText.text = $"You solved {correctCount} / {problems.Count} correctly!";
+        PlayerPrefs.SetInt("PlayerScore", 0);
+        PlayerPrefs.Save();
 
-        foreach (var problem in problems)
+        // Save answers without scoring - teacher will grade manually
+        WWWForm form = new WWWForm();
+        form.AddField("student_id", studentId);
+        form.AddField("assignment_id", assignmentId);
+        
+        // Convert answers dictionary to JSON
+        string answersJson = "{";
+        int count = 0;
+        foreach (var kvp in studentAnswers)
         {
-            string userAnswer = answerInput.text.Trim();
-
-            WWWForm form = new WWWForm();
-            form.AddField("student_id", studentId);
-            form.AddField("assignment_id", problem.id);
-            form.AddField("student_answer", userAnswer);
-
-            using (UnityWebRequest www = UnityWebRequest.Post("https://homeworkquest.site/submit_score.php", form))
-            {
-                yield return www.SendWebRequest();
-
-                if (www.result != UnityWebRequest.Result.Success)
-                    Debug.LogError("❌ Error saving score: " + www.error);
-                else
-                    Debug.Log("✅ Score response: " + www.downloadHandler.text);
-            }
+            if (count > 0) answersJson += ",";
+            answersJson += $"\"{kvp.Key}\":\"{kvp.Value}\"";
+            count++;
         }
+        answersJson += "}";
+        
+        form.AddField("answers_json", answersJson);
+        form.AddField("score", 0); // No auto-scoring, teacher will grade
+        form.AddField("total_points", problems.Count);
+
+        using (UnityWebRequest www = UnityWebRequest.Post("https://homequest-c3k7.onrender.com/submit_score2", form))
+        {
+            yield return www.SendWebRequest();
+
+            if (www.result != UnityWebRequest.Result.Success)
+                Debug.LogError("❌ Error submitting answers: " + www.error);
+            else
+                Debug.Log("✅ Answers submitted for teacher grading!");
+        }
+
+        yield return new WaitForSeconds(3f);
+        SceneManager.LoadScene("classroom");
     }
 }

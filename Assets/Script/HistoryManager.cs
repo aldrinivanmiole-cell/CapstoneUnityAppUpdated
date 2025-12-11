@@ -10,6 +10,8 @@ public class HistoryItem
     public int id;
     public string question_description;
     public string player_answer;
+    public string correct_answer;
+    public int is_correct; // 0 = wrong, 1 = correct
 }
 
 public class HistoryManager : MonoBehaviour
@@ -21,26 +23,34 @@ public class HistoryManager : MonoBehaviour
     public GameObject historyRowPrefab; // Assign 'HistoryRow' prefab
 
     private int studentId;
-    private string baseUrl = "https://homeworkquest.site/";
+    private string baseUrl = "https://homequest-c3k7.onrender.com/";
 
     void Start()
     {
         if (SessionManager.Instance == null)
         {
-            Debug.LogError("SessionManager not found!");
-            return;
+            Debug.LogWarning("SessionManager not found! Using default student ID.");
+            studentId = 1; // Default student ID for testing
+            if (titleText != null)
+                titleText.text = "Student's History";
+        }
+        else
+        {
+            studentId = SessionManager.Instance.StudentId;
+            if (titleText != null)
+                titleText.text = $"{SessionManager.Instance.Username}'s History";
         }
 
-        studentId = SessionManager.Instance.StudentId;
-        titleText.text = $"{SessionManager.Instance.Username}'s History";
+        // Hide score text
+        if (scoreText != null)
+            scoreText.gameObject.SetActive(false);
 
-        StartCoroutine(LoadTotalScore());
         StartCoroutine(LoadHistory());
     }
 
     IEnumerator LoadTotalScore()
     {
-        using (UnityWebRequest www = UnityWebRequest.Get(baseUrl + "get_score.php?student_id=" + studentId))
+        using (UnityWebRequest www = UnityWebRequest.Get(baseUrl + "get_score?student_id=" + studentId))
         {
             yield return www.SendWebRequest();
 
@@ -53,7 +63,7 @@ public class HistoryManager : MonoBehaviour
 
     IEnumerator LoadHistory()
     {
-        using (UnityWebRequest www = UnityWebRequest.Get(baseUrl + "get_history.php?student_id=" + studentId))
+        using (UnityWebRequest www = UnityWebRequest.Get(baseUrl + "get_history?student_id=" + studentId))
         {
             yield return www.SendWebRequest();
 
@@ -76,11 +86,32 @@ public class HistoryManager : MonoBehaviour
             foreach (var item in historyList)
             {
                 GameObject row = Instantiate(historyRowPrefab, contentContainer);
-                TMP_Text[] cols = row.GetComponentsInChildren<TMP_Text>();
-
-                cols[0].text = index.ToString();
-                cols[1].text = item.question_description;
-                cols[2].text = item.player_answer;
+                
+                // Try to get HistoryRow component
+                HistoryRow rowComponent = row.GetComponent<HistoryRow>();
+                
+                // If not found, try to add it dynamically
+                if (rowComponent == null)
+                {
+                    rowComponent = row.AddComponent<HistoryRow>();
+                    Debug.Log("HistoryRow component added dynamically to prefab instance.");
+                }
+                
+                if (rowComponent != null)
+                {
+                    // Find child TMP_Text components automatically
+                    TMP_Text[] textComponents = row.GetComponentsInChildren<TMP_Text>();
+                    if (textComponents.Length >= 4)
+                    {
+                        rowComponent.numberText = textComponents[0];
+                        rowComponent.questionText = textComponents[1];
+                        rowComponent.yourAnswerText = textComponents[2];
+                        rowComponent.rightAnswerText = textComponents[3];
+                    }
+                    
+                    rowComponent.SetData(index, item.question_description, item.player_answer, item.correct_answer);
+                    rowComponent.SetAnswerStatus(item.is_correct == 1);
+                }
 
                 index++;
             }

@@ -9,6 +9,7 @@ using UnityEngine.Networking;
 public class EssayQuestion
 {
     public int id;
+    public int assignment_id;
     public string question_description;
     public string tutorial_link; // ✅ Add tutorial link
 }
@@ -33,6 +34,7 @@ public class EssayManager : MonoBehaviour
     private List<EssayQuestion> questions = new List<EssayQuestion>();
     private int currentIndex = 0;
     private int studentId;
+    private int assignmentId;
 
     void Start()
     {
@@ -52,7 +54,9 @@ public class EssayManager : MonoBehaviour
 
     IEnumerator LoadEssayQuestions()
     {
-        using (UnityWebRequest www = UnityWebRequest.Get("https://homeworkquest.site/get_essay.php?student_id=" + studentId))
+        assignmentId = CurrentClassSession.SelectedCategoryId; // This is the assignment ID
+        string url = $"https://homequest-c3k7.onrender.com/get_essay?student_id={studentId}&assignment_id={assignmentId}";
+        using (UnityWebRequest www = UnityWebRequest.Get(url))
         {
             yield return www.SendWebRequest();
 
@@ -130,69 +134,73 @@ public class EssayManager : MonoBehaviour
         }
 
         var q = questions[currentIndex];
-
-        // ✅ Simple scoring: check if answer contains a keyword (e.g., correct_answer)
-        int score = 0;
-        if (!string.IsNullOrEmpty(answer))
-        {
-            // Example: if essay should contain "Unity", we can give 1 point
-            if (answer.ToLower().Contains("unity"))
-                score = 1; // 1 point for correct keyword
-        }
-
-        StartCoroutine(SaveEssayAnswer(studentId, q.id, q.question_description, answer, score));
+        StartCoroutine(SaveEssayAnswer(studentId, assignmentId, q.id, q.question_description, answer));
     }
 
-IEnumerator SaveEssayAnswer(int studentId, int questionId, string questionText, string playerAnswer, int score)
-{
-    WWWForm essayForm = new WWWForm();
-    essayForm.AddField("student_id", studentId);
-    essayForm.AddField("assignment_id", questionId);
-    essayForm.AddField("answer_text", playerAnswer);
-    essayForm.AddField("score", score); // ✅ send score to server
-
-    using (UnityWebRequest www = UnityWebRequest.Post("https://homeworkquest.site/submit_essay.php", essayForm))
+    IEnumerator SaveEssayAnswer(int studentId, int assignmentId, int questionId, string questionText, string playerAnswer)
     {
-        yield return www.SendWebRequest();
+        WWWForm form = new WWWForm();
+        form.AddField("student_id", studentId);
+        form.AddField("assignment_id", assignmentId);
+        form.AddField("question_id", questionId);
+        form.AddField("question_text", questionText);
+        form.AddField("student_answer", playerAnswer);
+        form.AddField("correct_answer", "Pending teacher review");
+        form.AddField("is_correct", 0); // Essays are not auto-graded
 
-        if (www.result != UnityWebRequest.Result.Success)
-        {
-            Debug.LogError("Error submitting essay: " + www.error);
-        }
-        else
-        {
-            var response = JsonUtility.FromJson<EssayServerResponse>(www.downloadHandler.text);
-            Debug.Log("Essay submitted: " + response.message + " | Score: " + score);
-        }
-    }
-
-    currentIndex++;
-    ShowQuestion();
-}
-
-    IEnumerator SaveEssayAnswer(int studentId, int questionId, string questionText, string playerAnswer)
-    {
-        WWWForm essayForm = new WWWForm();
-        essayForm.AddField("student_id", studentId);
-        essayForm.AddField("assignment_id", questionId);
-        essayForm.AddField("answer_text", playerAnswer);
-
-        using (UnityWebRequest www = UnityWebRequest.Post("https://homeworkquest.site/submit_essay.php", essayForm))
+        using (UnityWebRequest www = UnityWebRequest.Post("https://homequest-c3k7.onrender.com/save_history", form))
         {
             yield return www.SendWebRequest();
 
             if (www.result != UnityWebRequest.Result.Success)
             {
-                Debug.LogError("Error submitting essay: " + www.error);
+                Debug.LogError("Error saving essay: " + www.error);
             }
             else
             {
-                var response = JsonUtility.FromJson<EssayServerResponse>(www.downloadHandler.text);
-                Debug.Log("Essay submitted: " + response.message);
+                Debug.Log("✅ Essay saved to history successfully!");
             }
         }
 
         currentIndex++;
-        ShowQuestion();
+        
+        if (currentIndex >= questions.Count)
+        {
+            // All essays submitted, mark as completed
+            StartCoroutine(MarkAssignmentComplete());
+        }
+        else
+        {
+            ShowQuestion();
+        }
+    }
+    
+    IEnumerator MarkAssignmentComplete()
+    {
+        // Submit assignment completion to mark as completed
+        WWWForm form = new WWWForm();
+        form.AddField("student_id", studentId);
+        form.AddField("assignment_id", assignmentId);
+        form.AddField("score", 0); // Essays are graded by teacher, score is 0 until graded
+
+        using (UnityWebRequest www = UnityWebRequest.Post("https://homequest-c3k7.onrender.com/submit_score", form))
+        {
+            yield return www.SendWebRequest();
+
+            if (www.result != UnityWebRequest.Result.Success)
+            {
+                Debug.LogError("Error marking assignment complete: " + www.error);
+            }
+            else
+            {
+                Debug.Log("✅ Essay assignment marked as complete!");
+            }
+        }
+        
+        // Show completion message and go back to map
+        finishPanel.SetActive(true);
+        messageText.text = "All essays submitted!\nWaiting for teacher review.";
+        yield return new WaitForSeconds(3f);
+        UnityEngine.SceneManagement.SceneManager.LoadScene("map");
     }
 }

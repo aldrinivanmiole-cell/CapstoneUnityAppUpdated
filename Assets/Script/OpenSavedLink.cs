@@ -6,7 +6,7 @@ using System.Collections;
 public class OpenSavedLink : MonoBehaviour
 {
     [Header("PHP Endpoint URL")]
-    public string getLinkUrl = "https://homeworkquest.site/get_link.php"; // your PHP URL
+    public string getLinkUrl = "https://homequest-c3k7.onrender.com/get_link"; // Flask API endpoint
 
     private string savedLink = "";
 
@@ -61,7 +61,7 @@ public class OpenSavedLink : MonoBehaviour
                     currentActivity.Call("startActivity", intent);
                 }
             }
-            catch (System.Exception e)
+            catch (System.Exception)
             {
                 Debug.LogWarning("⚠️ Chrome not found, opening with default browser instead.");
                 Application.OpenURL(savedLink);

@@ -317,7 +317,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 39630822f41698f418c22f99542acd19, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  loginSceneName: historyScene
+  previousSceneName: NEWMAP
 --- !u!1 &173713618
 GameObject:
   m_ObjectHideFlags: 0
@@ -640,7 +640,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 39630822f41698f418c22f99542acd19, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  loginSceneName: classroom
+  previousSceneName: NEWMAP
 --- !u!1 &528547759
 GameObject:
   m_ObjectHideFlags: 0
@@ -908,7 +908,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: -1.6199646, y: 4.0650635}
+  m_AnchoredPosition: {x: -1.6199951, y: 4.0650635}
   m_SizeDelta: {x: -164.72006, y: -405.26984}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &666428157
@@ -3567,7 +3567,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   textObject: {fileID: 1938866213}
-  firstSentence: Hi, Welcome back!
+  firstSentence: Hi, Welcome!
   secondSentence: Enter our school to enter classrooms...
   delayBetweenSentences: 1.5
   typeSpeed: 0.05
