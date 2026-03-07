@@ -870,6 +870,9 @@ public class ClassroomManager : MonoBehaviour
 
     IEnumerator LoadAssignmentTypes(int classId)
     {
+        if (noQuestionPanel != null)
+            noQuestionPanel.SetActive(false);
+
         List<AssignmentTypeData> categoryList = null;
         List<AssignmentTypeData> firstEmptyCategories = null;
         string firstEmptyBase = string.Empty;
@@ -972,6 +975,7 @@ public class ClassroomManager : MonoBehaviour
         if (categoryList != null && categoryList.Count > 0)
         {
             if (stagePanel != null) stagePanel.SetActive(true);
+            if (noQuestionPanel != null) noQuestionPanel.SetActive(false);
 
             ClearSpawnedButtons();
 
@@ -982,7 +986,8 @@ public class ClassroomManager : MonoBehaviour
                     Debug.Log($"📝 Assignment: {category.description}, ID: {category.category_id}");
 
                     string assignmentType = GetAssignmentType(category.description, category.assignment_type);
-                    if (string.IsNullOrEmpty(assignmentType)) continue;
+                    if (string.IsNullOrEmpty(assignmentType))
+                        assignmentType = "MultipleChoice";
 
                     GameObject buttonObj = Instantiate(categoryButtonPrefab, categoryButtonContainer);
                     buttonObj.SetActive(true);
@@ -991,7 +996,8 @@ public class ClassroomManager : MonoBehaviour
                     TMP_Text buttonText = buttonObj.GetComponentInChildren<TMP_Text>();
                     if (buttonText != null)
                     {
-                        buttonText.text = category.description.ToUpper();
+                        string label = string.IsNullOrWhiteSpace(category.description) ? "Activity" : category.description.Trim();
+                        buttonText.text = label.ToUpper();
                     }
 
                     Image buttonImage = buttonObj.GetComponent<Image>();
@@ -1187,6 +1193,8 @@ public class ClassroomManager : MonoBehaviour
     {
         string typeLower = string.IsNullOrWhiteSpace(explicitType) ? "" : explicitType.Trim().ToLowerInvariant();
         if (typeLower.Contains("yes_no") || typeLower.Contains("yes/no") || typeLower.Contains("true") || typeLower.Contains("false"))
+            return "Alchemy";
+        if (typeLower.Contains("yesno"))
             return "Alchemy";
         if (typeLower.Contains("identification"))
             return "Identification";
