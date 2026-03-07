@@ -95,6 +95,25 @@ public class ClassroomManager : MonoBehaviour
         public List<AssignmentServerItem> activities;
     }
 
+    [System.Serializable]
+    private class LegacyAssignmentItem
+    {
+        public int assignmentId;
+        public int assignment_id;
+        public string assignmentName;
+        public string assignment_name;
+        public string title;
+        public string assignmentType;
+        public string assignment_type;
+        public bool isSubmitted;
+    }
+
+    [System.Serializable]
+    private class LegacyAssignmentsResponse
+    {
+        public List<LegacyAssignmentItem> assignments;
+    }
+
     private class ClassroomListWrapper
     {
         public List<ClassroomData> classrooms;
@@ -912,6 +931,42 @@ public class ClassroomManager : MonoBehaviour
                 lastError = request.error + " | endpoint=" + legacyUrl + " | code=" + request.responseCode;
             }
 
+            if (categoryList == null)
+            {
+                string legacyAssignmentsUrl = baseApi + "/get_assignments?student_id=" + studentId + "&classroom_id=" + classId;
+                using (UnityWebRequest request = UnityWebRequest.Get(legacyAssignmentsUrl))
+                {
+                    request.timeout = 12;
+                    yield return request.SendWebRequest();
+
+                    if (request.result == UnityWebRequest.Result.Success)
+                    {
+                        string body = request.downloadHandler != null ? request.downloadHandler.text : "";
+                        List<AssignmentTypeData> parsed = ParseAssignmentTypesFromLegacyAssignments(body);
+                        if (parsed != null)
+                        {
+                            if (parsed.Count > 0)
+                            {
+                                categoryList = parsed;
+                                PlayerPrefs.SetString("ApiBaseUrl", baseApi);
+                                PlayerPrefs.Save();
+                                break;
+                            }
+
+                            if (firstEmptyCategories == null)
+                            {
+                                firstEmptyCategories = parsed;
+                                firstEmptyBase = baseApi;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        lastError = request.error + " | endpoint=" + legacyAssignmentsUrl + " | code=" + request.responseCode;
+                    }
+                }
+            }
+
             string subjectName = ResolveSubjectNameByClassId(classId);
             if (string.IsNullOrWhiteSpace(subjectName))
                 continue;
@@ -1086,6 +1141,71 @@ public class ClassroomManager : MonoBehaviour
                 description = title,
                 assignment_type = assignmentType,
                 is_completed = false
+            });
+        }
+
+        return result;
+    }
+
+    private List<AssignmentTypeData> ParseAssignmentTypesFromLegacyAssignments(string body)
+    {
+        List<AssignmentTypeData> result = new List<AssignmentTypeData>();
+        if (string.IsNullOrWhiteSpace(body))
+            return result;
+
+        List<LegacyAssignmentItem> source = null;
+        try
+        {
+            source = JsonUtilityWrapper.FromJsonList<LegacyAssignmentItem>(body);
+        }
+        catch
+        {
+        }
+
+        if (source == null || source.Count == 0)
+        {
+            try
+            {
+                LegacyAssignmentsResponse parsed = JsonUtility.FromJson<LegacyAssignmentsResponse>(body);
+                if (parsed != null && parsed.assignments != null)
+                    source = parsed.assignments;
+            }
+            catch
+            {
+            }
+        }
+
+        if (source == null)
+            return result;
+
+        for (int i = 0; i < source.Count; i++)
+        {
+            LegacyAssignmentItem item = source[i];
+            if (item == null)
+                continue;
+
+            int assignmentId = item.assignmentId > 0 ? item.assignmentId : item.assignment_id;
+            if (assignmentId <= 0)
+                continue;
+
+            string title = item.assignmentName;
+            if (string.IsNullOrWhiteSpace(title))
+                title = item.assignment_name;
+            if (string.IsNullOrWhiteSpace(title))
+                title = item.title;
+            if (string.IsNullOrWhiteSpace(title))
+                title = "Assignment";
+
+            string assignmentType = item.assignmentType;
+            if (string.IsNullOrWhiteSpace(assignmentType))
+                assignmentType = item.assignment_type;
+
+            result.Add(new AssignmentTypeData
+            {
+                category_id = assignmentId,
+                description = title.Trim(),
+                assignment_type = assignmentType,
+                is_completed = item.isSubmitted
             });
         }
 
