@@ -83,6 +83,7 @@ public class MultipleChoiceManager : MonoBehaviour
     [SerializeField] private bool enableStoryIntro = true;
     [SerializeField] private float storyFadeDuration = 0.22f;
     [SerializeField] private float storyTypeSpeed = 0.02f;
+    [SerializeField] private float storyLineFadeDuration = 0.18f;
 
     private List<MCQuestion> questions = new List<MCQuestion>();
     private int currentIndex = 0;
@@ -109,13 +110,23 @@ public class MultipleChoiceManager : MonoBehaviour
     private List<string> storyIntroLines = new List<string>();
     private bool storyLineFullyShown = false;
     private Coroutine storyTypingCoroutine;
+    private Coroutine storyPromptBlinkCoroutine;
+    private Coroutine storyMascotCoroutine;
 
     // Programmatically created story UI
     private GameObject storyIntroPanel;
     private CanvasGroup storyIntroCanvasGroup;
+    private RectTransform storyPopupCardRect;
+    private Button storyPopupButton;
     private TMP_Text storyIntroTitleText;
     private TMP_Text storyIntroBodyText;
     private TMP_Text storyIntroHintText;
+    private TMP_Text storyLineCounterText;
+    private Button storyNextButton;
+    private Button storyStartButton;
+    private Image storyMascotImage;
+    private RectTransform storyMascotRect;
+    private ParticleSystem storySparkles;
 
     void Start()
     {
@@ -414,6 +425,8 @@ public class MultipleChoiceManager : MonoBehaviour
 
     void OnChoiceSelected(MCQuestion question, MCAnswer selectedChoice)
     {
+        if (isStoryIntroActive) return;
+
         // NEW: Show confirmation dialog instead of immediate submit
         pendingAnswer = selectedChoice;
         
@@ -671,6 +684,7 @@ public class MultipleChoiceManager : MonoBehaviour
     
     void OnPreviousClicked()
     {
+        if (isStoryIntroActive) return;
         if (isTransitioning) return;
         if (currentIndex > 0 && !lockedQuestions.Contains(currentIndex - 1))
         {
@@ -732,6 +746,7 @@ public class MultipleChoiceManager : MonoBehaviour
 
         SetChoicesVisible(false);
         SetTutorialUiVisible(false);
+        SetActivityUiInteractable(false);
 
         if (submitButton != null)
             submitButton.gameObject.SetActive(false);
@@ -740,16 +755,16 @@ public class MultipleChoiceManager : MonoBehaviour
             previousButton.gameObject.SetActive(false);
 
         if (nextButton != null)
-            nextButton.gameObject.SetActive(true);
+            nextButton.gameObject.SetActive(false);
 
         if (storyIntroTitleText != null)
-            storyIntroTitleText.text = "Story Time";
+            storyIntroTitleText.text = "Story Time!";
 
         if (storyIntroPanel != null)
             storyIntroPanel.SetActive(true);
 
         StartCoroutine(AnimateStoryIntroPanel(true));
-        RenderStoryIntroLine();
+        StartCoroutine(ShowStoryLine(false));
     }
 
     private void AdvanceStoryIntro()
@@ -762,32 +777,17 @@ public class MultipleChoiceManager : MonoBehaviour
 
         storyIntroIndex++;
         if (storyIntroIndex >= storyIntroLines.Count)
-        {
-            isStoryIntroActive = false;
-            storyIntroIndex = 0;
-
-            if (storyTypingCoroutine != null)
-            {
-                StopCoroutine(storyTypingCoroutine);
-                storyTypingCoroutine = null;
-            }
-
-            StartCoroutine(AnimateStoryIntroPanel(false));
-
-            if (previousButton != null)
-                previousButton.gameObject.SetActive(true);
-
-            ShowQuestion();
-            UpdateNavigationButtons();
             return;
-        }
 
-        RenderStoryIntroLine();
+        StartCoroutine(ShowStoryLine(true));
     }
 
-    private void RenderStoryIntroLine()
+    private IEnumerator ShowStoryLine(bool animateChange)
     {
-        string line = storyIntroIndex < storyIntroLines.Count ? storyIntroLines[storyIntroIndex] : string.Empty;
+        if (storyIntroIndex >= storyIntroLines.Count)
+            yield break;
+
+        string line = storyIntroLines[storyIntroIndex];
         storyLineFullyShown = false;
 
         if (storyTypingCoroutine != null)
@@ -796,14 +796,25 @@ public class MultipleChoiceManager : MonoBehaviour
             storyTypingCoroutine = null;
         }
 
+        StopPromptBlink();
+        StartMascotTalking();
+        UpdateStoryFooter(false);
+
+        if (storyIntroBodyText != null && animateChange)
+            yield return StartCoroutine(FadeText(storyIntroBodyText, 1f, 0f, storyLineFadeDuration));
+
         if (storyIntroBodyText != null)
         {
+            storyIntroBodyText.text = string.Empty;
+            SetTextAlpha(storyIntroBodyText, 0f);
             storyTypingCoroutine = StartCoroutine(TypeStoryLine(line));
         }
         else if (questionText != null)
         {
             questionText.text = line;
             storyLineFullyShown = true;
+            StopMascotTalking();
+            UpdateStoryFooter(true);
         }
 
         if (progressText != null)
@@ -815,18 +826,8 @@ public class MultipleChoiceManager : MonoBehaviour
             difficultyBadge.color = new Color(0.35f, 0.65f, 1f);
         }
 
-        if (nextButton != null)
-        {
-            TMP_Text nextButtonText = nextButton.GetComponentInChildren<TMP_Text>();
-            if (nextButtonText != null)
-            {
-                bool isLastLine = storyIntroIndex >= storyIntroLines.Count - 1;
-                nextButtonText.text = isLastLine ? "Start Quiz" : "Next";
-            }
-        }
-
-        if (storyIntroHintText != null)
-            storyIntroHintText.text = "Tap Next to continue";
+        if (storyLineCounterText != null)
+            storyLineCounterText.text = $"{storyIntroIndex + 1} / {storyIntroLines.Count}";
     }
 
     private List<string> BuildStoryIntroLines()
@@ -860,18 +861,27 @@ public class MultipleChoiceManager : MonoBehaviour
         if (string.IsNullOrEmpty(line))
         {
             storyLineFullyShown = true;
+            StopMascotTalking();
+            UpdateStoryFooter(true);
             yield break;
         }
 
         float delay = Mathf.Max(0.008f, storyTypeSpeed);
+        float alphaStep = line.Length > 0 ? 1f / line.Length : 1f;
+        float currentAlpha = 0f;
         for (int i = 0; i < line.Length; i++)
         {
             storyIntroBodyText.text += line[i];
+            currentAlpha = Mathf.Clamp01(currentAlpha + alphaStep);
+            SetTextAlpha(storyIntroBodyText, Mathf.Max(currentAlpha, 0.18f));
             yield return new WaitForSeconds(delay);
         }
 
+        SetTextAlpha(storyIntroBodyText, 1f);
         storyLineFullyShown = true;
         storyTypingCoroutine = null;
+        StopMascotTalking();
+        UpdateStoryFooter(true);
     }
 
     private void CompleteStoryLineInstant()
@@ -887,11 +897,16 @@ public class MultipleChoiceManager : MonoBehaviour
 
         string line = storyIntroLines[storyIntroIndex];
         if (storyIntroBodyText != null)
+        {
             storyIntroBodyText.text = line;
+            SetTextAlpha(storyIntroBodyText, 1f);
+        }
         else if (questionText != null)
             questionText.text = line;
 
         storyLineFullyShown = true;
+        StopMascotTalking();
+        UpdateStoryFooter(true);
     }
 
     private IEnumerator AnimateStoryIntroPanel(bool show)
@@ -906,6 +921,10 @@ public class MultipleChoiceManager : MonoBehaviour
             storyIntroCanvasGroup.interactable = true;
             if (storyIntroPanel != null)
                 storyIntroPanel.SetActive(true);
+            if (storyPopupCardRect != null)
+                storyPopupCardRect.localScale = Vector3.zero;
+            if (storySparkles != null)
+                storySparkles.Play(true);
         }
 
         float duration = Mathf.Max(0.01f, storyFadeDuration);
@@ -917,15 +936,39 @@ public class MultipleChoiceManager : MonoBehaviour
         {
             elapsed += Time.deltaTime;
             storyIntroCanvasGroup.alpha = Mathf.Lerp(start, end, elapsed / duration);
+
+            if (storyPopupCardRect != null)
+            {
+                if (show)
+                {
+                    float t = Mathf.Clamp01(elapsed / duration);
+                    float scale = t < 0.7f
+                        ? Mathf.Lerp(0f, 1.08f, t / 0.7f)
+                        : Mathf.Lerp(1.08f, 1f, (t - 0.7f) / 0.3f);
+                    storyPopupCardRect.localScale = new Vector3(scale, scale, 1f);
+                }
+                else
+                {
+                    float scale = Mathf.Lerp(1f, 0.92f, elapsed / duration);
+                    storyPopupCardRect.localScale = new Vector3(scale, scale, 1f);
+                }
+            }
+
             yield return null;
         }
 
         storyIntroCanvasGroup.alpha = end;
+        if (storyPopupCardRect != null)
+            storyPopupCardRect.localScale = show ? Vector3.one : new Vector3(0.92f, 0.92f, 1f);
 
         if (!show)
         {
             storyIntroCanvasGroup.blocksRaycasts = false;
             storyIntroCanvasGroup.interactable = false;
+            StopPromptBlink();
+            StopMascotTalking();
+            if (storySparkles != null)
+                storySparkles.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
             if (storyIntroPanel != null)
                 storyIntroPanel.SetActive(false);
         }
@@ -951,58 +994,412 @@ public class MultipleChoiceManager : MonoBehaviour
         panelRect.anchoredPosition = Vector2.zero;
 
         Image panelBg = storyIntroPanel.AddComponent<Image>();
-        panelBg.color = new Color(0.06f, 0.12f, 0.24f, 0.92f);
+        panelBg.color = new Color(0f, 0f, 0f, 180f / 255f);
 
         storyIntroCanvasGroup = storyIntroPanel.AddComponent<CanvasGroup>();
         storyIntroCanvasGroup.alpha = 0f;
         storyIntroCanvasGroup.blocksRaycasts = false;
         storyIntroCanvasGroup.interactable = false;
 
+        GameObject popupObj = new GameObject("PopupCard");
+        popupObj.transform.SetParent(storyIntroPanel.transform, false);
+        storyPopupCardRect = popupObj.AddComponent<RectTransform>();
+        storyPopupCardRect.anchorMin = new Vector2(0.5f, 0.5f);
+        storyPopupCardRect.anchorMax = new Vector2(0.5f, 0.5f);
+        storyPopupCardRect.sizeDelta = new Vector2(1160f, 700f);
+        storyPopupCardRect.anchoredPosition = Vector2.zero;
+
+        Image popupImage = popupObj.AddComponent<Image>();
+        popupImage.color = new Color(0.96f, 0.89f, 0.71f, 1f);
+        Outline popupOutline = popupObj.AddComponent<Outline>();
+        popupOutline.effectColor = new Color(0.53f, 0.34f, 0.18f, 0.95f);
+        popupOutline.effectDistance = new Vector2(6f, -6f);
+        Shadow popupShadow = popupObj.AddComponent<Shadow>();
+        popupShadow.effectColor = new Color(0f, 0f, 0f, 0.28f);
+        popupShadow.effectDistance = new Vector2(10f, -10f);
+
+        storyPopupButton = popupObj.AddComponent<Button>();
+        ColorBlock popupColors = storyPopupButton.colors;
+        popupColors.normalColor = Color.white;
+        popupColors.highlightedColor = new Color(1f, 0.98f, 0.9f, 1f);
+        popupColors.pressedColor = new Color(0.96f, 0.89f, 0.71f, 1f);
+        popupColors.selectedColor = Color.white;
+        storyPopupButton.colors = popupColors;
+        storyPopupButton.onClick.AddListener(OnStoryAdvanceRequested);
+
+        GameObject headerBand = new GameObject("HeaderBand");
+        headerBand.transform.SetParent(popupObj.transform, false);
+        RectTransform headerBandRect = headerBand.AddComponent<RectTransform>();
+        headerBandRect.anchorMin = new Vector2(0.5f, 0.88f);
+        headerBandRect.anchorMax = new Vector2(0.5f, 0.88f);
+        headerBandRect.sizeDelta = new Vector2(880f, 84f);
+        headerBandRect.anchoredPosition = Vector2.zero;
+        Image headerBandImage = headerBand.AddComponent<Image>();
+        headerBandImage.color = new Color(0.84f, 0.63f, 0.32f, 0.85f);
+
         GameObject titleObj = new GameObject("Title");
-        titleObj.transform.SetParent(storyIntroPanel.transform, false);
+        titleObj.transform.SetParent(popupObj.transform, false);
         RectTransform titleRect = titleObj.AddComponent<RectTransform>();
-        titleRect.anchorMin = new Vector2(0.5f, 0.82f);
-        titleRect.anchorMax = new Vector2(0.5f, 0.82f);
-        titleRect.sizeDelta = new Vector2(980f, 120f);
+        titleRect.anchorMin = new Vector2(0.5f, 0.88f);
+        titleRect.anchorMax = new Vector2(0.5f, 0.88f);
+        titleRect.sizeDelta = new Vector2(860f, 90f);
         titleRect.anchoredPosition = Vector2.zero;
 
         storyIntroTitleText = titleObj.AddComponent<TextMeshProUGUI>();
-        storyIntroTitleText.text = "Story Time";
-        storyIntroTitleText.fontSize = 64;
+        storyIntroTitleText.text = "Story Time!";
+        storyIntroTitleText.fontSize = 54;
         storyIntroTitleText.fontStyle = FontStyles.Bold;
         storyIntroTitleText.alignment = TextAlignmentOptions.Center;
-        storyIntroTitleText.color = new Color(1f, 0.92f, 0.55f, 1f);
+        storyIntroTitleText.color = new Color(0.35f, 0.2f, 0.08f, 1f);
+
+        GameObject mascotObj = new GameObject("MascotBadge");
+        mascotObj.transform.SetParent(popupObj.transform, false);
+        storyMascotRect = mascotObj.AddComponent<RectTransform>();
+        storyMascotRect.anchorMin = new Vector2(0.17f, 0.52f);
+        storyMascotRect.anchorMax = new Vector2(0.17f, 0.52f);
+        storyMascotRect.sizeDelta = new Vector2(170f, 170f);
+        storyMascotRect.anchoredPosition = Vector2.zero;
+        storyMascotImage = mascotObj.AddComponent<Image>();
+        storyMascotImage.color = new Color(1f, 0.84f, 0.35f, 1f);
+        Outline mascotOutline = mascotObj.AddComponent<Outline>();
+        mascotOutline.effectColor = new Color(0.42f, 0.24f, 0.1f, 0.9f);
+        mascotOutline.effectDistance = new Vector2(4f, -4f);
+
+        GameObject mascotFaceObj = new GameObject("MascotFace");
+        mascotFaceObj.transform.SetParent(mascotObj.transform, false);
+        RectTransform mascotFaceRect = mascotFaceObj.AddComponent<RectTransform>();
+        mascotFaceRect.anchorMin = new Vector2(0.5f, 0.5f);
+        mascotFaceRect.anchorMax = new Vector2(0.5f, 0.5f);
+        mascotFaceRect.sizeDelta = new Vector2(140f, 120f);
+        mascotFaceRect.anchoredPosition = new Vector2(0f, 6f);
+        TMP_Text mascotFaceText = mascotFaceObj.AddComponent<TextMeshProUGUI>();
+        mascotFaceText.text = "★";
+        mascotFaceText.fontSize = 82;
+        mascotFaceText.fontStyle = FontStyles.Bold;
+        mascotFaceText.alignment = TextAlignmentOptions.Center;
+        mascotFaceText.color = new Color(0.48f, 0.26f, 0.08f, 1f);
 
         GameObject bodyObj = new GameObject("Body");
-        bodyObj.transform.SetParent(storyIntroPanel.transform, false);
+        bodyObj.transform.SetParent(popupObj.transform, false);
         RectTransform bodyRect = bodyObj.AddComponent<RectTransform>();
-        bodyRect.anchorMin = new Vector2(0.5f, 0.52f);
-        bodyRect.anchorMax = new Vector2(0.5f, 0.52f);
-        bodyRect.sizeDelta = new Vector2(1180f, 340f);
+        bodyRect.anchorMin = new Vector2(0.56f, 0.54f);
+        bodyRect.anchorMax = new Vector2(0.56f, 0.54f);
+        bodyRect.sizeDelta = new Vector2(720f, 300f);
         bodyRect.anchoredPosition = Vector2.zero;
 
         storyIntroBodyText = bodyObj.AddComponent<TextMeshProUGUI>();
         storyIntroBodyText.text = string.Empty;
-        storyIntroBodyText.fontSize = 46;
+        storyIntroBodyText.fontSize = 40;
         storyIntroBodyText.alignment = TextAlignmentOptions.Center;
-        storyIntroBodyText.color = new Color(0.96f, 0.98f, 1f, 1f);
+        storyIntroBodyText.color = new Color(0.28f, 0.18f, 0.1f, 1f);
         storyIntroBodyText.enableWordWrapping = true;
 
+        GameObject counterObj = new GameObject("LineCounter");
+        counterObj.transform.SetParent(popupObj.transform, false);
+        RectTransform counterRect = counterObj.AddComponent<RectTransform>();
+        counterRect.anchorMin = new Vector2(0.18f, 0.14f);
+        counterRect.anchorMax = new Vector2(0.18f, 0.14f);
+        counterRect.sizeDelta = new Vector2(120f, 50f);
+        counterRect.anchoredPosition = Vector2.zero;
+        storyLineCounterText = counterObj.AddComponent<TextMeshProUGUI>();
+        storyLineCounterText.text = "1 / 4";
+        storyLineCounterText.fontSize = 28;
+        storyLineCounterText.alignment = TextAlignmentOptions.Center;
+        storyLineCounterText.color = new Color(0.42f, 0.28f, 0.16f, 0.8f);
+
         GameObject hintObj = new GameObject("Hint");
-        hintObj.transform.SetParent(storyIntroPanel.transform, false);
+        hintObj.transform.SetParent(popupObj.transform, false);
         RectTransform hintRect = hintObj.AddComponent<RectTransform>();
-        hintRect.anchorMin = new Vector2(0.5f, 0.2f);
-        hintRect.anchorMax = new Vector2(0.5f, 0.2f);
-        hintRect.sizeDelta = new Vector2(900f, 60f);
+        hintRect.anchorMin = new Vector2(0.44f, 0.14f);
+        hintRect.anchorMax = new Vector2(0.44f, 0.14f);
+        hintRect.sizeDelta = new Vector2(300f, 52f);
         hintRect.anchoredPosition = Vector2.zero;
 
         storyIntroHintText = hintObj.AddComponent<TextMeshProUGUI>();
-        storyIntroHintText.text = "Tap Next to continue";
-        storyIntroHintText.fontSize = 32;
+        storyIntroHintText.text = "Tap to Continue ▸";
+        storyIntroHintText.fontSize = 28;
         storyIntroHintText.alignment = TextAlignmentOptions.Center;
-        storyIntroHintText.color = new Color(0.72f, 0.88f, 1f, 1f);
+        storyIntroHintText.color = new Color(0.34f, 0.22f, 0.12f, 1f);
+
+        GameObject nextObj = new GameObject("StoryNextButton");
+        nextObj.transform.SetParent(popupObj.transform, false);
+        RectTransform nextRect = nextObj.AddComponent<RectTransform>();
+        nextRect.anchorMin = new Vector2(0.84f, 0.14f);
+        nextRect.anchorMax = new Vector2(0.84f, 0.14f);
+        nextRect.sizeDelta = new Vector2(170f, 64f);
+        nextRect.anchoredPosition = Vector2.zero;
+        Image nextImage = nextObj.AddComponent<Image>();
+        nextImage.color = new Color(0.82f, 0.56f, 0.2f, 1f);
+        Shadow nextShadow = nextObj.AddComponent<Shadow>();
+        nextShadow.effectColor = new Color(0f, 0f, 0f, 0.2f);
+        nextShadow.effectDistance = new Vector2(4f, -4f);
+        storyNextButton = nextObj.AddComponent<Button>();
+        storyNextButton.onClick.AddListener(OnStoryAdvanceRequested);
+        GameObject nextLabelObj = new GameObject("Text");
+        nextLabelObj.transform.SetParent(nextObj.transform, false);
+        RectTransform nextLabelRect = nextLabelObj.AddComponent<RectTransform>();
+        nextLabelRect.anchorMin = Vector2.zero;
+        nextLabelRect.anchorMax = Vector2.one;
+        nextLabelRect.sizeDelta = Vector2.zero;
+        TMP_Text nextLabel = nextLabelObj.AddComponent<TextMeshProUGUI>();
+        nextLabel.text = "Next";
+        nextLabel.fontSize = 30;
+        nextLabel.fontStyle = FontStyles.Bold;
+        nextLabel.alignment = TextAlignmentOptions.Center;
+        nextLabel.color = Color.white;
+
+        GameObject startObj = new GameObject("StartActivityButton");
+        startObj.transform.SetParent(popupObj.transform, false);
+        RectTransform startRect = startObj.AddComponent<RectTransform>();
+        startRect.anchorMin = new Vector2(0.5f, 0.14f);
+        startRect.anchorMax = new Vector2(0.5f, 0.14f);
+        startRect.sizeDelta = new Vector2(320f, 74f);
+        startRect.anchoredPosition = Vector2.zero;
+        Image startImage = startObj.AddComponent<Image>();
+        startImage.color = new Color(0.2f, 0.72f, 0.24f, 1f);
+        Shadow startShadow = startObj.AddComponent<Shadow>();
+        startShadow.effectColor = new Color(0f, 0f, 0f, 0.22f);
+        startShadow.effectDistance = new Vector2(5f, -5f);
+        storyStartButton = startObj.AddComponent<Button>();
+        storyStartButton.onClick.AddListener(OnStoryStartActivityRequested);
+        GameObject startLabelObj = new GameObject("Text");
+        startLabelObj.transform.SetParent(startObj.transform, false);
+        RectTransform startLabelRect = startLabelObj.AddComponent<RectTransform>();
+        startLabelRect.anchorMin = Vector2.zero;
+        startLabelRect.anchorMax = Vector2.one;
+        startLabelRect.sizeDelta = Vector2.zero;
+        TMP_Text startLabel = startLabelObj.AddComponent<TextMeshProUGUI>();
+        startLabel.text = "Start Activity!";
+        startLabel.fontSize = 30;
+        startLabel.fontStyle = FontStyles.Bold;
+        startLabel.alignment = TextAlignmentOptions.Center;
+        startLabel.color = Color.white;
+        startObj.SetActive(false);
+
+        GameObject sparkleObj = new GameObject("Sparkles");
+        sparkleObj.transform.SetParent(popupObj.transform, false);
+        sparkleObj.transform.localPosition = Vector3.zero;
+        storySparkles = sparkleObj.AddComponent<ParticleSystem>();
+        var main = storySparkles.main;
+        main.playOnAwake = false;
+        main.loop = true;
+        main.startLifetime = 1.6f;
+        main.startSpeed = 8f;
+        main.startSize = 14f;
+        main.startColor = new Color(1f, 0.95f, 0.65f, 0.7f);
+        main.simulationSpace = ParticleSystemSimulationSpace.Local;
+        main.maxParticles = 40;
+        var emission = storySparkles.emission;
+        emission.rateOverTime = 10f;
+        var shape = storySparkles.shape;
+        shape.shapeType = ParticleSystemShapeType.Rectangle;
+        shape.scale = new Vector3(10.2f, 6.2f, 0.1f);
+        var velocity = storySparkles.velocityOverLifetime;
+        velocity.enabled = true;
+        velocity.space = ParticleSystemSimulationSpace.Local;
+        velocity.y = new ParticleSystem.MinMaxCurve(3f, 9f);
+        var renderer = sparkleObj.GetComponent<ParticleSystemRenderer>();
+        renderer.sortingOrder = 500;
 
         storyIntroPanel.SetActive(false);
+    }
+
+    private void OnStoryAdvanceRequested()
+    {
+        if (!isStoryIntroActive)
+            return;
+
+        if (!storyLineFullyShown)
+        {
+            CompleteStoryLineInstant();
+            return;
+        }
+
+        if (IsLastStoryLine())
+            return;
+
+        AdvanceStoryIntro();
+    }
+
+    private void OnStoryStartActivityRequested()
+    {
+        if (!isStoryIntroActive)
+            return;
+
+        if (!storyLineFullyShown)
+        {
+            CompleteStoryLineInstant();
+            return;
+        }
+
+        StartCoroutine(CloseStoryIntroAndBeginActivity());
+    }
+
+    private IEnumerator CloseStoryIntroAndBeginActivity()
+    {
+        isStoryIntroActive = false;
+        storyIntroIndex = 0;
+
+        yield return StartCoroutine(AnimateStoryIntroPanel(false));
+
+        if (previousButton != null)
+            previousButton.gameObject.SetActive(true);
+        if (nextButton != null)
+            nextButton.gameObject.SetActive(true);
+
+        SetActivityUiInteractable(true);
+        ShowQuestion();
+        UpdateNavigationButtons();
+    }
+
+    private bool IsLastStoryLine()
+    {
+        return storyIntroLines != null && storyIntroLines.Count > 0 && storyIntroIndex >= storyIntroLines.Count - 1;
+    }
+
+    private void UpdateStoryFooter(bool lineReady)
+    {
+        bool lastLine = IsLastStoryLine();
+
+        if (storyLineCounterText != null && storyIntroLines != null && storyIntroLines.Count > 0)
+            storyLineCounterText.text = $"{storyIntroIndex + 1} / {storyIntroLines.Count}";
+
+        if (storyIntroHintText != null)
+        {
+            storyIntroHintText.gameObject.SetActive(lineReady && !lastLine);
+            storyIntroHintText.text = "Tap to Continue ▸";
+        }
+
+        if (storyNextButton != null)
+            storyNextButton.gameObject.SetActive(lineReady && !lastLine);
+
+        if (storyStartButton != null)
+            storyStartButton.gameObject.SetActive(lineReady && lastLine);
+
+        if (storyPopupButton != null)
+            storyPopupButton.interactable = !lastLine;
+
+        if (lineReady && !lastLine)
+            StartPromptBlink();
+        else
+            StopPromptBlink();
+    }
+
+    private IEnumerator FadeText(TMP_Text textComponent, float from, float to, float duration)
+    {
+        if (textComponent == null)
+            yield break;
+
+        float elapsed = 0f;
+        float safeDuration = Mathf.Max(0.01f, duration);
+        while (elapsed < safeDuration)
+        {
+            elapsed += Time.deltaTime;
+            SetTextAlpha(textComponent, Mathf.Lerp(from, to, elapsed / safeDuration));
+            yield return null;
+        }
+
+        SetTextAlpha(textComponent, to);
+    }
+
+    private void SetTextAlpha(TMP_Text textComponent, float alpha)
+    {
+        if (textComponent == null)
+            return;
+
+        Color color = textComponent.color;
+        color.a = Mathf.Clamp01(alpha);
+        textComponent.color = color;
+    }
+
+    private void StartPromptBlink()
+    {
+        if (storyPromptBlinkCoroutine != null)
+            StopCoroutine(storyPromptBlinkCoroutine);
+
+        if (storyIntroHintText != null && storyIntroHintText.gameObject.activeSelf)
+            storyPromptBlinkCoroutine = StartCoroutine(BlinkPromptLoop());
+    }
+
+    private void StopPromptBlink()
+    {
+        if (storyPromptBlinkCoroutine != null)
+        {
+            StopCoroutine(storyPromptBlinkCoroutine);
+            storyPromptBlinkCoroutine = null;
+        }
+
+        if (storyIntroHintText != null)
+            SetTextAlpha(storyIntroHintText, 1f);
+    }
+
+    private IEnumerator BlinkPromptLoop()
+    {
+        while (storyIntroHintText != null && storyIntroHintText.gameObject.activeSelf)
+        {
+            float alpha = 0.45f + (Mathf.Sin(Time.unscaledTime * 3.2f) + 1f) * 0.275f;
+            SetTextAlpha(storyIntroHintText, alpha);
+            yield return null;
+        }
+
+        storyPromptBlinkCoroutine = null;
+    }
+
+    private void StartMascotTalking()
+    {
+        if (storyMascotCoroutine != null)
+            StopCoroutine(storyMascotCoroutine);
+
+        if (storyMascotRect != null)
+            storyMascotCoroutine = StartCoroutine(MascotTalkLoop());
+    }
+
+    private void StopMascotTalking()
+    {
+        if (storyMascotCoroutine != null)
+        {
+            StopCoroutine(storyMascotCoroutine);
+            storyMascotCoroutine = null;
+        }
+
+        if (storyMascotRect != null)
+            storyMascotRect.anchoredPosition = Vector2.zero;
+    }
+
+    private IEnumerator MascotTalkLoop()
+    {
+        while (storyMascotRect != null && isStoryIntroActive && !storyLineFullyShown)
+        {
+            float y = Mathf.Sin(Time.unscaledTime * 5.2f) * 8f;
+            storyMascotRect.anchoredPosition = new Vector2(0f, y);
+            yield return null;
+        }
+
+        if (storyMascotRect != null)
+            storyMascotRect.anchoredPosition = Vector2.zero;
+
+        storyMascotCoroutine = null;
+    }
+
+    private void SetActivityUiInteractable(bool interactable)
+    {
+        if (choiceButtons != null)
+        {
+            for (int i = 0; i < choiceButtons.Count; i++)
+            {
+                if (choiceButtons[i] != null)
+                    choiceButtons[i].interactable = interactable;
+            }
+        }
+
+        if (previousButton != null)
+            previousButton.interactable = interactable;
+        if (nextButton != null)
+            nextButton.interactable = interactable;
+        if (submitButton != null)
+            submitButton.interactable = interactable;
+        if (tutorialButton != null)
+            tutorialButton.interactable = interactable;
     }
 
     private void SetChoicesVisible(bool visible)
@@ -1066,6 +1463,8 @@ public class MultipleChoiceManager : MonoBehaviour
 
     void OnSubmitClicked()
     {
+        if (isStoryIntroActive) return;
+
         // Check if all questions answered
         foreach (string answer in studentAnswers)
         {
