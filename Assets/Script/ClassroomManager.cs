@@ -8,9 +8,12 @@ using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
 using UnityEngine.EventSystems;
 using System.Text;
+using System.Globalization;
 
 public class ClassroomManager : MonoBehaviour
 {
+    private const string ClassroomCacheKey = "LegacyRoomAssignments";
+
     [System.Serializable]
     private class ApiErrorPayload
     {
@@ -34,6 +37,7 @@ public class ClassroomManager : MonoBehaviour
         public string description;
         public string subjectName;
         public string name;
+        public string dueDate;
     }
 
     [System.Serializable]
@@ -44,6 +48,10 @@ public class ClassroomManager : MonoBehaviour
         public string subject_name;
         public string activity;
         public string activity_title;
+        public string latest_activity_due_date;
+        public string activity_due_date;
+        public string latest_activity_deadline;
+        public string latest_activity_due_date_display;
     }
 
     [System.Serializable]
@@ -76,6 +84,7 @@ public class ClassroomManager : MonoBehaviour
         public string description;
         public string assignment_type;
         public bool is_completed;
+        public string due_date_text;
     }
 
     [System.Serializable]
@@ -86,6 +95,16 @@ public class ClassroomManager : MonoBehaviour
         public string title;
         public string assignment_type;
         public string type;
+        public bool is_submitted;
+        public bool isSubmitted;
+        public bool is_completed;
+        public string due_date;
+        public string deadline;
+        public string due_at;
+        public string dueDate;
+        public string due_date_display;
+        public string deadline_display;
+        public string deadlineDisplay;
     }
 
     [System.Serializable]
@@ -103,6 +122,13 @@ public class ClassroomManager : MonoBehaviour
         public string assignmentName;
         public string assignment_name;
         public string title;
+        public string due_date;
+        public string deadline;
+        public string due_at;
+        public string dueDate;
+        public string due_date_display;
+        public string deadline_display;
+        public string deadlineDisplay;
         public string assignmentType;
         public string assignment_type;
         public bool isSubmitted;
@@ -114,11 +140,27 @@ public class ClassroomManager : MonoBehaviour
         public List<LegacyAssignmentItem> assignments;
     }
 
+    [System.Serializable]
     private class ClassroomListWrapper
     {
         public List<ClassroomData> classrooms;
     }
 
+    // Persistent class_id → room_no assignments (one entry per enrolled class).
+    [System.Serializable]
+    private class ClassRoomMapEntry
+    {
+        public int classId;
+        public int roomNo;
+    }
+
+    [System.Serializable]
+    private class ClassRoomMapWrapper
+    {
+        public List<ClassRoomMapEntry> entries = new List<ClassRoomMapEntry>();
+    }
+
+    [System.Serializable]
     private class AssignmentTypeListWrapper
     {
         public List<AssignmentTypeData> categories;
@@ -128,6 +170,11 @@ public class ClassroomManager : MonoBehaviour
     public TMP_InputField entryCodeInput;
     public Button submitButton;
     public Button scanQRButton;
+
+    [Header("QR Camera Preview (Optional)")]
+    public GameObject qrCameraPreviewPanel;
+    public RawImage qrCameraPreviewImage;
+    public Button qrCameraCloseButton;
 
     [Header("Rooms (r1–r12)")]
     public List<RoomUI> rooms = new List<RoomUI>();
@@ -157,14 +204,27 @@ public class ClassroomManager : MonoBehaviour
     public TMP_Text warningText;
 
     private bool enterCodeButtonHidden;
+    private bool isLoadingRoomAssignments;
 
     private string baseUrl = "https://homequest-c3k7.onrender.com/";
     private int studentId;
     private int currentClassId;
     private int selectedRoomId;
-    private string selectedAssignmentType = ""; // Store the type of selected assignment
-
     private Dictionary<int, ClassroomData> classroomDataByRoom = new Dictionary<int, ClassroomData>();
+    private HashSet<int> pendingRoomIds = new HashSet<int>();
+    private WebCamTexture qrCameraTexture;
+    private bool isQrCameraOpening;
+
+    private string BuildStudentScopedKey(string baseKey)
+    {
+        if (string.IsNullOrWhiteSpace(baseKey))
+            return string.Empty;
+
+        if (studentId > 0)
+            return baseKey + "_student_" + studentId;
+
+        return baseKey;
+    }
 
     void Start()
     {
@@ -203,6 +263,8 @@ public class ClassroomManager : MonoBehaviour
 
         if (scanQRButton != null)
             scanQRButton.onClick.AddListener(OnScanQR);
+        if (qrCameraCloseButton != null)
+            qrCameraCloseButton.onClick.AddListener(CloseQrCameraPreview);
         if (exitButton != null)
             exitButton.onClick.AddListener(OnExitButtonClicked);
         if (joinClassButton != null)
@@ -226,12 +288,8 @@ public class ClassroomManager : MonoBehaviour
 
         if (string.IsNullOrWhiteSpace(entryCodeInput.text))
         {
-            if (!enterCodeButtonHidden && submitButton != null)
-            {
-                submitButton.gameObject.SetActive(false);
-                enterCodeButtonHidden = true;
-            }
-
+            if (submitButton != null && !submitButton.gameObject.activeSelf)
+                submitButton.gameObject.SetActive(true);
             FocusEntryInput();
             return;
         }
@@ -282,6 +340,7 @@ public class ClassroomManager : MonoBehaviour
             return;
         }
 
+        pendingRoomIds.Add(selectedRoomId);
         StartCoroutine(SaveClassroom(selectedRoomId, code));
     }
 
@@ -290,6 +349,17 @@ public class ClassroomManager : MonoBehaviour
     /// </summary>
     void OnSubmitClassCode()
     {
+        if (isLoadingRoomAssignments)
+        {
+            if (warningText != null)
+            {
+                warningText.text = "Please wait, classrooms are still loading";
+                warningText.gameObject.SetActive(true);
+                StartCoroutine(HideWarningAfterDelay(2f));
+            }
+            return;
+        }
+
         if (entryCodeInput == null || string.IsNullOrEmpty(entryCodeInput.text))
         {
             Debug.LogWarning("⚠️ Please enter a class code!");
@@ -330,6 +400,7 @@ public class ClassroomManager : MonoBehaviour
         }
 
         // Join the classroom in the first empty room
+        pendingRoomIds.Add(emptyRoomId);
         StartCoroutine(SaveClassroom(emptyRoomId, code));
     }
 
@@ -339,6 +410,17 @@ public class ClassroomManager : MonoBehaviour
     void OnScanQR()
     {
         Debug.Log("📷 Opening QR Scanner...");
+
+        if (isLoadingRoomAssignments)
+        {
+            if (warningText != null)
+            {
+                warningText.text = "Please wait, classrooms are still loading";
+                warningText.gameObject.SetActive(true);
+                StartCoroutine(HideWarningAfterDelay(2f));
+            }
+            return;
+        }
 
 #if UNITY_EDITOR
         // Test mode in Unity Editor
@@ -355,10 +437,9 @@ public class ClassroomManager : MonoBehaviour
             }
             return;
         }
+        pendingRoomIds.Add(emptyRoomId);
         StartCoroutine(SaveClassroom(emptyRoomId, "TEST123"));
 #else
-        // Production mode - implement actual QR scanner
-        // TODO: Add ZXing or similar QR scanner plugin
         StartQRScanner();
 #endif
     }
@@ -368,28 +449,188 @@ public class ClassroomManager : MonoBehaviour
     /// </summary>
     void StartQRScanner()
     {
-        // TODO: Implement with QR scanner plugin
-        // Example with ZXing:
-        /*
-        QRCodeReader reader = new QRCodeReader();
-        reader.OnQRCodeScanned += (scannedCode) => {
-            Debug.Log($"📷 Scanned QR Code: {scannedCode}");
-            int emptyRoomId = FindFirstEmptyRoom();
-            if (emptyRoomId != -1)
-            {
-                StartCoroutine(SaveClassroom(emptyRoomId, scannedCode));
-            }
-        };
-        reader.StartScanning();
-        */
+        if (!isActiveAndEnabled)
+            return;
 
-        Debug.LogWarning("⚠️ QR Scanner not implemented yet. Add ZXing or similar plugin.");
+        StartCoroutine(OpenDeviceCameraForQr());
+    }
+
+    private IEnumerator OpenDeviceCameraForQr()
+    {
+        if (isQrCameraOpening)
+            yield break;
+
+        isQrCameraOpening = true;
+
+        if (!Application.HasUserAuthorization(UserAuthorization.WebCam))
+            yield return Application.RequestUserAuthorization(UserAuthorization.WebCam);
+
+        if (!Application.HasUserAuthorization(UserAuthorization.WebCam))
+        {
+            if (warningText != null)
+            {
+                warningText.text = "Camera permission denied";
+                warningText.gameObject.SetActive(true);
+                StartCoroutine(HideWarningAfterDelay(3f));
+            }
+
+            isQrCameraOpening = false;
+            yield break;
+        }
+
+        EnsureQrCameraOverlay();
+
+        if (qrCameraPreviewImage == null)
+        {
+            Debug.LogError("QR preview image is missing.");
+            isQrCameraOpening = false;
+            yield break;
+        }
+
+        WebCamDevice[] cameras = WebCamTexture.devices;
+        if (cameras == null || cameras.Length == 0)
+        {
+            if (warningText != null)
+            {
+                warningText.text = "No camera found on device";
+                warningText.gameObject.SetActive(true);
+                StartCoroutine(HideWarningAfterDelay(3f));
+            }
+
+            isQrCameraOpening = false;
+            yield break;
+        }
+
+        int cameraIndex = 0;
+        for (int i = 0; i < cameras.Length; i++)
+        {
+            if (!cameras[i].isFrontFacing)
+            {
+                cameraIndex = i;
+                break;
+            }
+        }
+
+        StopQrCameraPreview();
+
+        qrCameraTexture = new WebCamTexture(cameras[cameraIndex].name, 1280, 720, 30);
+        qrCameraPreviewImage.texture = qrCameraTexture;
+        qrCameraPreviewImage.color = Color.white;
+
+        if (qrCameraPreviewPanel != null)
+            qrCameraPreviewPanel.SetActive(true);
+
+        qrCameraTexture.Play();
+
         if (warningText != null)
         {
-            warningText.text = "QR Scanner not available yet";
+            warningText.text = "Camera opened. Point to class QR code.";
             warningText.gameObject.SetActive(true);
-            StartCoroutine(HideWarningAfterDelay(3f));
+            StartCoroutine(HideWarningAfterDelay(2f));
         }
+
+        isQrCameraOpening = false;
+    }
+
+    private void EnsureQrCameraOverlay()
+    {
+        if (qrCameraPreviewPanel != null && qrCameraPreviewImage != null)
+            return;
+
+        Canvas parentCanvas = FindFirstObjectByType<Canvas>();
+        if (parentCanvas == null)
+        {
+            Debug.LogError("No Canvas found for QR camera preview.");
+            return;
+        }
+
+        GameObject panelObj = new GameObject("QrCameraPreviewPanel", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+        panelObj.transform.SetParent(parentCanvas.transform, false);
+
+        RectTransform panelRect = panelObj.GetComponent<RectTransform>();
+        panelRect.anchorMin = Vector2.zero;
+        panelRect.anchorMax = Vector2.one;
+        panelRect.offsetMin = Vector2.zero;
+        panelRect.offsetMax = Vector2.zero;
+
+        Image panelImage = panelObj.GetComponent<Image>();
+        panelImage.color = new Color(0f, 0f, 0f, 0.88f);
+
+        GameObject rawObj = new GameObject("QrCameraPreviewImage", typeof(RectTransform), typeof(CanvasRenderer), typeof(RawImage));
+        rawObj.transform.SetParent(panelObj.transform, false);
+
+        RectTransform rawRect = rawObj.GetComponent<RectTransform>();
+        rawRect.anchorMin = new Vector2(0.05f, 0.16f);
+        rawRect.anchorMax = new Vector2(0.95f, 0.86f);
+        rawRect.offsetMin = Vector2.zero;
+        rawRect.offsetMax = Vector2.zero;
+
+        RawImage rawImage = rawObj.GetComponent<RawImage>();
+        rawImage.color = new Color(1f, 1f, 1f, 0.2f);
+
+        GameObject closeObj = new GameObject("QrCameraCloseButton", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(Button));
+        closeObj.transform.SetParent(panelObj.transform, false);
+
+        RectTransform closeRect = closeObj.GetComponent<RectTransform>();
+        closeRect.anchorMin = new Vector2(0.5f, 0.06f);
+        closeRect.anchorMax = new Vector2(0.5f, 0.06f);
+        closeRect.pivot = new Vector2(0.5f, 0.5f);
+        closeRect.sizeDelta = new Vector2(260f, 74f);
+
+        Image closeImage = closeObj.GetComponent<Image>();
+        closeImage.color = new Color(0.85f, 0.18f, 0.18f, 0.95f);
+
+        Button closeButton = closeObj.GetComponent<Button>();
+        closeButton.onClick.AddListener(CloseQrCameraPreview);
+
+        GameObject labelObj = new GameObject("Text", typeof(RectTransform), typeof(TextMeshProUGUI));
+        labelObj.transform.SetParent(closeObj.transform, false);
+
+        RectTransform labelRect = labelObj.GetComponent<RectTransform>();
+        labelRect.anchorMin = Vector2.zero;
+        labelRect.anchorMax = Vector2.one;
+        labelRect.offsetMin = Vector2.zero;
+        labelRect.offsetMax = Vector2.zero;
+
+        TextMeshProUGUI label = labelObj.GetComponent<TextMeshProUGUI>();
+        label.text = "Close Camera";
+        label.alignment = TextAlignmentOptions.Center;
+        label.fontSize = 30f;
+        label.color = Color.white;
+
+        qrCameraPreviewPanel = panelObj;
+        qrCameraPreviewImage = rawImage;
+        qrCameraCloseButton = closeButton;
+        qrCameraPreviewPanel.SetActive(false);
+    }
+
+    private void CloseQrCameraPreview()
+    {
+        StopQrCameraPreview();
+        if (qrCameraPreviewPanel != null)
+            qrCameraPreviewPanel.SetActive(false);
+    }
+
+    private void StopQrCameraPreview()
+    {
+        if (qrCameraTexture != null)
+        {
+            if (qrCameraTexture.isPlaying)
+                qrCameraTexture.Stop();
+
+            Destroy(qrCameraTexture);
+            qrCameraTexture = null;
+        }
+    }
+
+    private void OnDisable()
+    {
+        StopQrCameraPreview();
+    }
+
+    private void OnDestroy()
+    {
+        StopQrCameraPreview();
     }
 
     /// <summary>
@@ -397,14 +638,37 @@ public class ClassroomManager : MonoBehaviour
     /// </summary>
     int FindFirstEmptyRoom()
     {
-        for (int i = 1; i <= rooms.Count; i++)
+        if (rooms == null)
+            return -1;
+
+        HashSet<int> occupied = new HashSet<int>();
+
+        // 1. Persistent map (class_id OR placeholder) → room_no.
+        Dictionary<int, int> classRoomMap = LoadClassRoomMap();
+        foreach (int r in classRoomMap.Values)
+            if (r > 0) occupied.Add(r);
+
+        // 2. In-memory state — catches edge cases where the map wasn't saved.
+        foreach (int r in classroomDataByRoom.Keys)
+            if (r > 0) occupied.Add(r);
+
+        // 3. In-flight reservations (waiting for server response).
+        foreach (int r in pendingRoomIds)
+            if (r > 0) occupied.Add(r);
+
+        for (int i = 0; i < rooms.Count; i++)
         {
-            if (!classroomDataByRoom.ContainsKey(i))
+            RoomUI room = rooms[i];
+            if (room == null || room.roomId <= 0)
+                continue;
+
+            if (!occupied.Contains(room.roomId))
             {
-                Debug.Log($"✅ Found empty room: r{i}");
-                return i;
+                Debug.Log($"✅ Found empty room: r{room.roomId}");
+                return room.roomId;
             }
         }
+
         return -1; // All rooms are full
     }
 
@@ -413,6 +677,7 @@ public class ClassroomManager : MonoBehaviour
         string normalizedCode = NormalizeClassCode(classCode);
         if (string.IsNullOrEmpty(normalizedCode))
         {
+            pendingRoomIds.Remove(roomNo);
             if (warningText != null)
             {
                 warningText.text = "Invalid class code format";
@@ -425,54 +690,33 @@ public class ClassroomManager : MonoBehaviour
         bool joined = false;
         string lastError = "";
         string joinedSubject = string.Empty;
+        ClassroomData joinedClassroom = null;
 
-        WWWForm legacyForm = new WWWForm();
-        legacyForm.AddField("student_id", studentId);
-        legacyForm.AddField("room_no", roomNo);
-        legacyForm.AddField("code", normalizedCode);
+        string joinUrl = baseUrl.TrimEnd('/') + "/student/join-class";
+        string json = "{\"student_id\":" + studentId + ",\"class_code\":\"" + normalizedCode + "\"}";
 
-        using (UnityWebRequest request = UnityWebRequest.Post(baseUrl + "save_classroom", legacyForm))
+        using (UnityWebRequest request = new UnityWebRequest(joinUrl, "POST"))
         {
+            request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
             yield return request.SendWebRequest();
 
             if (request.result == UnityWebRequest.Result.Success)
             {
-                joinedSubject = ExtractJoinedSubject(request.downloadHandler != null ? request.downloadHandler.text : string.Empty);
+                string responseBody = request.downloadHandler != null ? request.downloadHandler.text : string.Empty;
+                joinedClassroom = ExtractJoinedClassroom(responseBody);
+                joinedSubject = ResolveClassroomLabel(joinedClassroom);
                 joined = true;
             }
             else
             {
                 string responseText = request.downloadHandler != null ? request.downloadHandler.text : request.error;
-                lastError = "save_classroom => " + responseText;
-            }
-        }
-
-        if (!joined)
-        {
-            string joinUrl = baseUrl.TrimEnd('/') + "/student/join-class";
-            string json = "{\"student_id\":" + studentId + ",\"class_code\":\"" + normalizedCode + "\"}";
-
-            using (UnityWebRequest request = new UnityWebRequest(joinUrl, "POST"))
-            {
-                request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
-                request.downloadHandler = new DownloadHandlerBuffer();
-                request.SetRequestHeader("Content-Type", "application/json");
-                yield return request.SendWebRequest();
-
-                if (request.result == UnityWebRequest.Result.Success)
+                lastError = "student/join-class(json) => " + responseText;
+                if (IsAlreadyEnrolledError(lastError))
                 {
-                    joinedSubject = ExtractJoinedSubject(request.downloadHandler != null ? request.downloadHandler.text : string.Empty);
+                    Debug.Log("ℹ️ Student already enrolled in this class. Loading existing classrooms.");
                     joined = true;
-                }
-                else
-                {
-                    string responseText = request.downloadHandler != null ? request.downloadHandler.text : request.error;
-                    lastError = "student/join-class(json) => " + responseText;
-                    if (IsAlreadyEnrolledError(lastError))
-                    {
-                        Debug.Log("ℹ️ Student already enrolled in this class. Loading existing classrooms.");
-                        joined = true;
-                    }
                 }
             }
         }
@@ -489,7 +733,9 @@ public class ClassroomManager : MonoBehaviour
 
                 if (request.result == UnityWebRequest.Result.Success)
                 {
-                    joinedSubject = ExtractJoinedSubject(request.downloadHandler != null ? request.downloadHandler.text : string.Empty);
+                    string responseBody = request.downloadHandler != null ? request.downloadHandler.text : string.Empty;
+                    joinedClassroom = ExtractJoinedClassroom(responseBody);
+                    joinedSubject = ResolveClassroomLabel(joinedClassroom);
                     joined = true;
                 }
                 else
@@ -517,7 +763,9 @@ public class ClassroomManager : MonoBehaviour
 
                 if (request.result == UnityWebRequest.Result.Success)
                 {
-                    joinedSubject = ExtractJoinedSubject(request.downloadHandler != null ? request.downloadHandler.text : string.Empty);
+                    string responseBody = request.downloadHandler != null ? request.downloadHandler.text : string.Empty;
+                    joinedClassroom = ExtractJoinedClassroom(responseBody);
+                    joinedSubject = ResolveClassroomLabel(joinedClassroom);
                     joined = true;
                 }
                 else
@@ -535,6 +783,38 @@ public class ClassroomManager : MonoBehaviour
 
         if (!joined)
         {
+            WWWForm legacyForm = new WWWForm();
+            legacyForm.AddField("student_id", studentId);
+            legacyForm.AddField("room_no", roomNo);
+            legacyForm.AddField("code", normalizedCode);
+
+            using (UnityWebRequest request = UnityWebRequest.Post(baseUrl + "save_classroom", legacyForm))
+            {
+                yield return request.SendWebRequest();
+
+                if (request.result == UnityWebRequest.Result.Success)
+                {
+                    string responseBody = request.downloadHandler != null ? request.downloadHandler.text : string.Empty;
+                    joinedClassroom = ExtractJoinedClassroom(responseBody);
+                    joinedSubject = ResolveClassroomLabel(joinedClassroom);
+                    joined = true;
+                }
+                else
+                {
+                    string responseText = request.downloadHandler != null ? request.downloadHandler.text : request.error;
+                    lastError = "save_classroom => " + responseText;
+                    if (IsAlreadyEnrolledError(lastError))
+                    {
+                        Debug.Log("ℹ️ Student already enrolled in this class. Loading existing classrooms.");
+                        joined = true;
+                    }
+                }
+            }
+        }
+
+        if (!joined)
+        {
+            pendingRoomIds.Remove(roomNo);
             Debug.LogError($"Error saving classroom: {lastError}");
 
             if (warningText != null)
@@ -547,6 +827,28 @@ public class ClassroomManager : MonoBehaviour
         }
 
         Debug.Log("✅ Classroom saved successfully!");
+
+        if (joinedClassroom != null)
+        {
+            joinedClassroom.room_no = roomNo;
+            joinedSubject = ResolveClassroomLabel(joinedClassroom);
+            classroomDataByRoom[roomNo] = joinedClassroom;
+        }
+
+        // Always persist the slot as occupied.
+        // Use real class_id as key when available; otherwise use a negative-roomNo placeholder
+        // so the slot stays reserved even if class_id wasn't returned by the server.
+        {
+            Dictionary<int, int> classRoomMap = LoadClassRoomMap();
+            classRoomMap.Remove(-roomNo); // remove any old placeholder for this slot
+            if (joinedClassroom != null && joinedClassroom.class_id > 0)
+                classRoomMap[joinedClassroom.class_id] = roomNo;
+            else
+                classRoomMap[-roomNo] = roomNo; // placeholder: negative key, positive value
+            SaveClassRoomMap(classRoomMap);
+        }
+
+        pendingRoomIds.Remove(roomNo);
 
         if (!string.IsNullOrWhiteSpace(joinedSubject))
             UpdateRoomLabel(roomNo, joinedSubject.Trim());
@@ -620,6 +922,7 @@ public class ClassroomManager : MonoBehaviour
 
     IEnumerator LoadRoomAssignments()
     {
+        isLoadingRoomAssignments = true;
         List<ClassroomData> classroomList = null;
         List<ClassroomData> firstEmptyResult = null;
         string firstEmptyBase = string.Empty;
@@ -727,37 +1030,113 @@ public class ClassroomManager : MonoBehaviour
         if (classroomList == null)
         {
             Debug.LogError("Error loading classrooms: " + lastError);
-            yield break;
-        }
-
-        classroomDataByRoom.Clear();
-
-        foreach (var room in rooms)
-        {
-            room.roomText.text = "";
-            room.roomImage.color = new Color(0.8f, 0.8f, 0.8f);
-        }
-
-        if (classroomList.Count > 0)
-        {
-            Debug.Log($"📚 Found {classroomList.Count} classrooms");
-            foreach (var classroom in classroomList)
+            classroomList = LoadCachedClassrooms();
+            if (classroomList == null || classroomList.Count == 0)
             {
-                int roomNo = classroom.room_no > 0 ? classroom.room_no : ResolveFallbackRoomNo(classroom.class_id);
-                classroom.room_no = roomNo;
-
-                Debug.Log($"📖 Classroom - room_no: {classroom.room_no}, class_id: {classroom.class_id}, description: {classroom.description}");
-                classroomDataByRoom[classroom.room_no] = classroom;
-
-                RoomUI roomUI = rooms.Find(r => r.roomId == classroom.room_no);
-                Debug.Log($"🔍 Looking for room with ID {classroom.room_no}, found: {(roomUI != null ? "YES" : "NO")}");
-                if (roomUI != null)
-                {
-                    roomUI.roomText.text = ResolveClassroomLabel(classroom);
-                    roomUI.roomImage.color = Color.white;
-                }
+                isLoadingRoomAssignments = false;
+                yield break;
             }
         }
+
+        // class_id → room_no map is the single authority for slot assignments.
+        // Subject names always come from the server (teacher can rename anytime).
+        Dictionary<int, int> classRoomMap = LoadClassRoomMap();
+
+        // Replace placeholder entries (negative key = slot reserved before class_id was known)
+        // with proper class_id entries as the server now tells us the real IDs.
+        // First, collect the room_nos that placeholders are holding.
+        HashSet<int> placeholderRooms = new HashSet<int>();
+        List<int> placeholderKeys = new List<int>();
+        foreach (var kv in classRoomMap)
+        {
+            if (kv.Key < 0)
+            {
+                placeholderKeys.Add(kv.Key);
+                placeholderRooms.Add(kv.Value);
+            }
+        }
+        // Remove placeholders whose rooms are now claimed by a real class_id below.
+        // (Any placeholders for rooms not in this server list stay until the next load.)
+
+        HashSet<int> usedRooms = new HashSet<int>();
+
+        classroomDataByRoom.Clear();
+        foreach (var room in rooms)
+        {
+            if (room != null)
+            {
+                room.roomText.text = "";
+                room.roomImage.color = new Color(0.8f, 0.8f, 0.8f);
+            }
+        }
+
+        Debug.Log($"📚 Loading {classroomList.Count} classrooms from server");
+
+        foreach (var classroom in classroomList)
+        {
+            if (classroom == null || classroom.class_id <= 0)
+                continue;
+
+            int roomNo = 0;
+
+            // Use the previously saved slot for this class.
+            if (classRoomMap.TryGetValue(classroom.class_id, out int savedRoomNo) && savedRoomNo > 0)
+            {
+                bool roomExists = rooms.Exists(r => r != null && r.roomId == savedRoomNo);
+                if (roomExists && !usedRooms.Contains(savedRoomNo))
+                    roomNo = savedRoomNo;
+            }
+
+            // No saved slot or it's already taken — assign the next free slot.
+            if (roomNo <= 0)
+            {
+                for (int i = 0; i < rooms.Count; i++)
+                {
+                    if (rooms[i] != null && rooms[i].roomId > 0 && !usedRooms.Contains(rooms[i].roomId))
+                    {
+                        roomNo = rooms[i].roomId;
+                        break;
+                    }
+                }
+            }
+
+            if (roomNo <= 0)
+            {
+                Debug.LogWarning($"⚠️ No slot available for class {classroom.class_id}");
+                continue;
+            }
+
+            // Persist any newly assigned or confirmed slot.
+            // Remove placeholder for this room if one exists.
+            if (placeholderRooms.Contains(roomNo))
+            {
+                for (int pi = placeholderKeys.Count - 1; pi >= 0; pi--)
+                {
+                    if (classRoomMap.TryGetValue(placeholderKeys[pi], out int pRoom) && pRoom == roomNo)
+                    {
+                        classRoomMap.Remove(placeholderKeys[pi]);
+                        placeholderKeys.RemoveAt(pi);
+                    }
+                }
+                placeholderRooms.Remove(roomNo);
+            }
+            classRoomMap[classroom.class_id] = roomNo;
+            usedRooms.Add(roomNo);
+            classroom.room_no = roomNo;
+            classroomDataByRoom[roomNo] = classroom;
+
+            Debug.Log($"📖 class_id={classroom.class_id} '{ResolveClassroomLabel(classroom)}' → slot {roomNo}");
+
+            RoomUI roomUI = rooms.Find(r => r != null && r.roomId == roomNo);
+            if (roomUI != null)
+            {
+                roomUI.roomText.text = ResolveClassroomLabel(classroom);
+                roomUI.roomImage.color = Color.white;
+            }
+        }
+
+        SaveClassRoomMap(classRoomMap);
+        isLoadingRoomAssignments = false;
     }
 
     private List<ClassroomData> ConvertSubjectsToClassrooms(List<StudentSubjectData> subjects)
@@ -779,14 +1158,14 @@ public class ClassroomManager : MonoBehaviour
             if (string.IsNullOrWhiteSpace(subjectLabel))
                 continue;
 
-            int roomNo = (i % Mathf.Max(1, rooms.Count)) + 1;
             result.Add(new ClassroomData
             {
-                room_no = roomNo,
+                room_no = 0,
                 class_id = subject.class_id,
                 description = subjectLabel,
                 subjectName = subjectLabel,
-                name = subjectLabel
+                name = subjectLabel,
+                dueDate = ResolveSubjectDueDate(subject)
             });
         }
 
@@ -800,6 +1179,51 @@ public class ClassroomManager : MonoBehaviour
 
         int index = Mathf.Abs(classId) % rooms.Count;
         return rooms[index].roomId;
+    }
+
+    private int ResolveUniqueRoomNo(int preferredRoomNo, int previousRoomNo, int classId, HashSet<int> usedRoomIds)
+    {
+        if (TryClaimRoom(preferredRoomNo, usedRoomIds, out int claimedRoomNo))
+            return claimedRoomNo;
+
+        if (TryClaimRoom(previousRoomNo, usedRoomIds, out claimedRoomNo))
+            return claimedRoomNo;
+
+        if (TryClaimRoom(ResolveFallbackRoomNo(classId), usedRoomIds, out claimedRoomNo))
+            return claimedRoomNo;
+
+        if (rooms != null)
+        {
+            for (int i = 0; i < rooms.Count; i++)
+            {
+                if (TryClaimRoom(rooms[i].roomId, usedRoomIds, out claimedRoomNo))
+                    return claimedRoomNo;
+            }
+        }
+
+        return 0;
+    }
+
+    private bool TryClaimRoom(int roomNo, HashSet<int> usedRoomIds, out int claimedRoomNo)
+    {
+        claimedRoomNo = 0;
+
+        if (roomNo <= 0 || usedRoomIds == null || rooms == null)
+            return false;
+
+        for (int i = 0; i < rooms.Count; i++)
+        {
+            if (rooms[i].roomId != roomNo)
+                continue;
+
+            if (usedRoomIds.Contains(roomNo))
+                return false;
+
+            claimedRoomNo = roomNo;
+            return true;
+        }
+
+        return false;
     }
 
     private List<string> BuildCandidateApiBases()
@@ -871,6 +1295,40 @@ public class ClassroomManager : MonoBehaviour
         return string.Empty;
     }
 
+    private static ClassroomData ExtractJoinedClassroom(string responseBody)
+    {
+        if (string.IsNullOrWhiteSpace(responseBody))
+            return null;
+
+        try
+        {
+            JoinClassResponse parsed = JsonUtility.FromJson<JoinClassResponse>(responseBody);
+            if (parsed == null)
+                return null;
+
+            string subjectLabel = !string.IsNullOrWhiteSpace(parsed.subject)
+                ? parsed.subject.Trim()
+                : (parsed.class_info != null ? parsed.class_info.name : string.Empty);
+
+            if (string.IsNullOrWhiteSpace(subjectLabel))
+                return null;
+
+            return new ClassroomData
+            {
+                room_no = 0,
+                class_id = parsed.class_info != null ? parsed.class_info.id : 0,
+                description = subjectLabel,
+                subjectName = subjectLabel,
+                name = subjectLabel
+            };
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
     private void UpdateRoomLabel(int roomNo, string label)
     {
         if (string.IsNullOrWhiteSpace(label))
@@ -885,6 +1343,188 @@ public class ClassroomManager : MonoBehaviour
 
         if (roomUI.roomImage != null)
             roomUI.roomImage.color = Color.white;
+    }
+
+    private List<ClassroomData> LoadCachedClassrooms()
+    {
+        string raw = PlayerPrefs.GetString(BuildStudentScopedKey(ClassroomCacheKey), string.Empty);
+        if (string.IsNullOrWhiteSpace(raw))
+            return new List<ClassroomData>();
+
+        try
+        {
+            ClassroomListWrapper wrapped = JsonUtility.FromJson<ClassroomListWrapper>(raw);
+            if (wrapped != null && wrapped.classrooms != null)
+                return NormalizeClassrooms(wrapped.classrooms);
+        }
+        catch
+        {
+        }
+
+        return new List<ClassroomData>();
+    }
+
+    private void SaveCachedClassrooms(List<ClassroomData> classrooms)
+    {
+        ClassroomListWrapper wrapper = new ClassroomListWrapper();
+        wrapper.classrooms = NormalizeClassrooms(classrooms);
+        PlayerPrefs.SetString(BuildStudentScopedKey(ClassroomCacheKey), JsonUtility.ToJson(wrapper));
+        PlayerPrefs.Save();
+    }
+
+    private const string ClassRoomMapKey = "ClassRoomMap";
+
+    /// <summary>
+    /// Loads the persisted class_id → room_no map for this student.
+    /// This is the ONLY authority for which slot each enrolled class occupies.
+    /// </summary>
+    private Dictionary<int, int> LoadClassRoomMap()
+    {
+        string raw = PlayerPrefs.GetString(BuildStudentScopedKey(ClassRoomMapKey), "");
+        if (string.IsNullOrEmpty(raw))
+            return new Dictionary<int, int>();
+
+        try
+        {
+            ClassRoomMapWrapper wrapper = JsonUtility.FromJson<ClassRoomMapWrapper>(raw);
+            Dictionary<int, int> map = new Dictionary<int, int>();
+            if (wrapper != null && wrapper.entries != null)
+            {
+                for (int i = 0; i < wrapper.entries.Count; i++)
+                {
+                    ClassRoomMapEntry e = wrapper.entries[i];
+                    if (e == null || e.roomNo <= 0)
+                        continue;
+                    // Accept both real class_id (positive) and placeholder (negative) entries.
+                    if (e.classId != 0)
+                        map[e.classId] = e.roomNo;
+                }
+            }
+            return map;
+        }
+        catch
+        {
+            return new Dictionary<int, int>();
+        }
+    }
+
+    private void SaveClassRoomMap(Dictionary<int, int> map)
+    {
+        ClassRoomMapWrapper wrapper = new ClassRoomMapWrapper();
+        foreach (var kv in map)
+            wrapper.entries.Add(new ClassRoomMapEntry { classId = kv.Key, roomNo = kv.Value });
+        PlayerPrefs.SetString(BuildStudentScopedKey(ClassRoomMapKey), JsonUtility.ToJson(wrapper));
+        PlayerPrefs.Save();
+    }
+
+    private static List<ClassroomData> MergeClassroomLists(List<ClassroomData> primary, List<ClassroomData> fallback)
+    {
+        List<ClassroomData> merged = new List<ClassroomData>();
+        Dictionary<string, int> indexByKey = new Dictionary<string, int>();
+
+        AppendClassrooms(merged, indexByKey, fallback, false);
+        AppendClassrooms(merged, indexByKey, primary, true);
+        return NormalizeClassrooms(merged);
+    }
+
+    private static void AppendClassrooms(List<ClassroomData> target, Dictionary<string, int> indexByKey, List<ClassroomData> source, bool preferSource)
+    {
+        if (target == null || indexByKey == null || source == null)
+            return;
+
+        for (int i = 0; i < source.Count; i++)
+        {
+            ClassroomData normalized = NormalizeClassroom(source[i]);
+            if (normalized == null)
+                continue;
+
+            string key = BuildClassroomKey(normalized);
+            if (string.IsNullOrWhiteSpace(key))
+                continue;
+
+            if (indexByKey.TryGetValue(key, out int existingIndex))
+            {
+                target[existingIndex] = preferSource
+                    ? MergeClassroom(target[existingIndex], normalized)
+                    : MergeClassroom(normalized, target[existingIndex]);
+            }
+            else
+            {
+                indexByKey[key] = target.Count;
+                target.Add(normalized);
+            }
+        }
+    }
+
+    private static ClassroomData MergeClassroom(ClassroomData fallback, ClassroomData preferred)
+    {
+        fallback = NormalizeClassroom(fallback);
+        preferred = NormalizeClassroom(preferred);
+
+        if (preferred == null)
+            return fallback;
+        if (fallback == null)
+            return preferred;
+
+        if (preferred.room_no <= 0)
+            preferred.room_no = fallback.room_no;
+        if (preferred.class_id <= 0)
+            preferred.class_id = fallback.class_id;
+        if (string.IsNullOrWhiteSpace(preferred.description))
+            preferred.description = fallback.description;
+        if (string.IsNullOrWhiteSpace(preferred.subjectName))
+            preferred.subjectName = fallback.subjectName;
+        if (string.IsNullOrWhiteSpace(preferred.name))
+            preferred.name = fallback.name;
+
+        return preferred;
+    }
+
+    private static List<ClassroomData> NormalizeClassrooms(List<ClassroomData> classrooms)
+    {
+        List<ClassroomData> normalized = new List<ClassroomData>();
+        if (classrooms == null)
+            return normalized;
+
+        for (int i = 0; i < classrooms.Count; i++)
+        {
+            ClassroomData classroom = NormalizeClassroom(classrooms[i]);
+            if (classroom != null)
+                normalized.Add(classroom);
+        }
+
+        return normalized;
+    }
+
+    private static ClassroomData NormalizeClassroom(ClassroomData classroom)
+    {
+        if (classroom == null)
+            return null;
+
+        string label = ResolveClassroomLabel(classroom);
+        if (string.IsNullOrWhiteSpace(label) && classroom.class_id <= 0)
+            return null;
+
+        if (string.IsNullOrWhiteSpace(classroom.description))
+            classroom.description = label;
+        if (string.IsNullOrWhiteSpace(classroom.subjectName))
+            classroom.subjectName = label;
+        if (string.IsNullOrWhiteSpace(classroom.name))
+            classroom.name = label;
+
+        return classroom;
+    }
+
+    private static string BuildClassroomKey(ClassroomData classroom)
+    {
+        if (classroom == null)
+            return string.Empty;
+
+        if (classroom.class_id > 0)
+            return "id:" + classroom.class_id;
+
+        string label = ResolveClassroomLabel(classroom);
+        return string.IsNullOrWhiteSpace(label) ? string.Empty : "label:" + label.Trim().ToLowerInvariant();
     }
 
     IEnumerator LoadAssignmentTypes(int classId)
@@ -967,14 +1607,10 @@ public class ClassroomManager : MonoBehaviour
                 }
             }
 
-            string subjectName = ResolveSubjectNameByClassId(classId);
-            if (string.IsNullOrWhiteSpace(subjectName))
-                continue;
-
             string[] modernPaths = new string[] { "/student/assignments", "/api/student/assignments" };
             for (int p = 0; p < modernPaths.Length && categoryList == null; p++)
             {
-                string endpoint = baseApi + modernPaths[p] + "?student_id=" + studentId + "&subject=" + UnityWebRequest.EscapeURL(subjectName);
+                string endpoint = baseApi + modernPaths[p] + "?student_id=" + studentId + "&class_id=" + classId;
                 using (UnityWebRequest request = UnityWebRequest.Get(endpoint))
                 {
                     request.timeout = 12;
@@ -1025,6 +1661,8 @@ public class ClassroomManager : MonoBehaviour
             yield break;
         }
 
+        yield return StartCoroutine(HydrateDueDatesFromModern(classId, categoryList));
+
         Debug.Log($"📋 Parsed {(categoryList != null ? categoryList.Count : 0)} assignment types");
 
         if (categoryList != null && categoryList.Count > 0)
@@ -1049,11 +1687,12 @@ public class ClassroomManager : MonoBehaviour
                     spawnedButtons.Add(buttonObj);
 
                     TMP_Text buttonText = buttonObj.GetComponentInChildren<TMP_Text>();
-                    if (buttonText != null)
-                    {
-                        string label = string.IsNullOrWhiteSpace(category.description) ? "Activity" : category.description.Trim();
-                        buttonText.text = label.ToUpper();
-                    }
+                    string label = string.IsNullOrWhiteSpace(category.description) ? "Activity" : category.description.Trim();
+                    string dueRaw = string.IsNullOrWhiteSpace(category.due_date_text)
+                        ? ResolveClassDueDateByClassId(currentClassId)
+                        : category.due_date_text;
+                    string dueLine = BuildDueLine(dueRaw);
+                    EnsureAssignmentButtonLayout(buttonObj, buttonText, label, assignmentType, dueLine, category.is_completed);
 
                     Image buttonImage = buttonObj.GetComponent<Image>();
                     if (buttonImage != null)
@@ -1071,7 +1710,16 @@ public class ClassroomManager : MonoBehaviour
                     {
                         int capturedCategoryId = category.category_id;
                         string capturedType = assignmentType;
-                        button.onClick.AddListener(() => OnCategorySelected(capturedCategoryId, capturedType));
+                        button.interactable = !category.is_completed;
+                        if (!category.is_completed)
+                            button.onClick.AddListener(() => OnCategorySelected(capturedCategoryId, capturedType));
+                    }
+
+                    if (category.is_completed)
+                    {
+                        Image doneBg = buttonObj.GetComponent<Image>();
+                        if (doneBg != null)
+                            doneBg.color = new Color(0.72f, 0.72f, 0.72f, 0.9f);
                     }
                 }
             }
@@ -1140,7 +1788,8 @@ public class ClassroomManager : MonoBehaviour
                 category_id = assignmentId,
                 description = title,
                 assignment_type = assignmentType,
-                is_completed = false
+                is_completed = ResolveSubmissionStatus(item),
+                due_date_text = ResolveDueDateText(item)
             });
         }
 
@@ -1205,7 +1854,8 @@ public class ClassroomManager : MonoBehaviour
                 category_id = assignmentId,
                 description = title.Trim(),
                 assignment_type = assignmentType,
-                is_completed = item.isSubmitted
+                is_completed = item.isSubmitted,
+                due_date_text = ResolveDueDateText(item)
             });
         }
 
@@ -1228,17 +1878,19 @@ public class ClassroomManager : MonoBehaviour
 
         string type = string.IsNullOrWhiteSpace(assignmentType) ? "" : assignmentType.Trim();
         if (string.Equals(type, "Alchemy", StringComparison.OrdinalIgnoreCase))
-            LoadSceneWithFallbacks("Alchemy", "YN-Opening", "TrueFalseScene", "NewMap");
+            LoadSceneWithFallbacks("TrueFalseScene", "yn", "NewMap");
         else if (string.Equals(type, "Identification", StringComparison.OrdinalIgnoreCase))
-            LoadSceneWithFallbacks("Identification", "identification", "MC-Opening", "NewMap");
+            LoadSceneWithFallbacks("Identification", "identification", "NewMap");
+        else if (type.IndexOf("enumeration", StringComparison.OrdinalIgnoreCase) >= 0)
+            LoadSceneWithFallbacks("EnumerationScene", "enumeration", "NewMap");
         else if (type.IndexOf("problem", StringComparison.OrdinalIgnoreCase) >= 0)
-            LoadSceneWithFallbacks("ProblemSolving", "problemSolving", "ps", "MC-Opening", "NewMap");
+            LoadSceneWithFallbacks("ProblemSolving", "problemSolving", "ps", "NewMap");
         else if (type.IndexOf("fill", StringComparison.OrdinalIgnoreCase) >= 0 || type.IndexOf("blank", StringComparison.OrdinalIgnoreCase) >= 0 || string.Equals(type, "FIB", StringComparison.OrdinalIgnoreCase))
-            LoadSceneWithFallbacks("FillInTheBlank", "fib", "MC-Opening", "NewMap");
+            LoadSceneWithFallbacks("FillInTheBlank", "fib", "NewMap");
         else if (type.IndexOf("essay", StringComparison.OrdinalIgnoreCase) >= 0)
-            LoadSceneWithFallbacks("Essay", "essay", "MC-Opening", "NewMap");
+            LoadSceneWithFallbacks("Essay", "essay", "NewMap");
         else
-            LoadSceneWithFallbacks("MultipleChoice", "MC-Opening", "NewMap");
+            LoadSceneWithFallbacks("MultipleChoice", "NewMap");
     }
 
     void LoadSceneWithFallbacks(string preferredScene, params string[] fallbackScenes)
@@ -1322,9 +1974,11 @@ public class ClassroomManager : MonoBehaviour
             return "Essay";
         if (typeLower.Contains("fill") || typeLower.Contains("fib") || typeLower.Contains("blank"))
             return "FillInTheBlank";
+        if (typeLower.Contains("enumeration"))
+            return "Enumeration";
         if (typeLower.Contains("problem"))
             return "ProblemSolving";
-        if (typeLower.Contains("multiple_choice") || typeLower.Contains("multiplechoice") || typeLower.Contains("enumeration"))
+        if (typeLower.Contains("multiple_choice") || typeLower.Contains("multiplechoice"))
             return "MultipleChoice";
 
         if (!string.IsNullOrWhiteSpace(description) && (description.Contains("True") || description.Contains("False")))
@@ -1333,6 +1987,8 @@ public class ClassroomManager : MonoBehaviour
             return "Identification";
         else if (!string.IsNullOrWhiteSpace(description) && description.Contains("Essay"))
             return "Essay";
+        else if (!string.IsNullOrWhiteSpace(description) && description.Contains("Enumeration"))
+            return "Enumeration";
         else if (!string.IsNullOrWhiteSpace(description) && description.Contains("Multiple Choice"))
             return "MultipleChoice";
 
@@ -1402,6 +2058,296 @@ public class ClassroomManager : MonoBehaviour
                 }
             }
         }
+    }
+
+    private static string BuildDueLine(string dueText)
+    {
+        string resolved = string.IsNullOrWhiteSpace(dueText) ? "No deadline" : dueText.Trim();
+        return "DUE: " + resolved;
+    }
+
+    private static void EnsureAssignmentButtonLayout(GameObject buttonObj, TMP_Text fallbackText, string title, string assignmentType, string dueLine, bool isCompleted)
+    {
+        if (buttonObj == null)
+            return;
+
+        if (fallbackText != null)
+            fallbackText.gameObject.SetActive(false);
+
+        Transform root = buttonObj.transform.Find("RuntimeLayout");
+        if (root == null)
+        {
+            GameObject rootObj = new GameObject("RuntimeLayout", typeof(RectTransform));
+            rootObj.transform.SetParent(buttonObj.transform, false);
+            RectTransform rrt = rootObj.GetComponent<RectTransform>();
+            rrt.anchorMin = Vector2.zero;
+            rrt.anchorMax = Vector2.one;
+            rrt.offsetMin = new Vector2(16f, 4f);
+            rrt.offsetMax = new Vector2(-16f, -4f);
+            root = rootObj.transform;
+        }
+
+        TMP_Text titleText = EnsureText(root, "TitleText", 32f, TextAlignmentOptions.MidlineLeft, new Color32(32, 33, 36, 255));
+        RectTransform titleRt = titleText.GetComponent<RectTransform>();
+        titleRt.anchorMin = new Vector2(0f, 0f);
+        titleRt.anchorMax = new Vector2(0.68f, 1f);
+        titleRt.offsetMin = Vector2.zero;
+        titleRt.offsetMax = new Vector2(-8f, 0f);
+        titleText.textWrappingMode = TextWrappingModes.NoWrap;
+        titleText.overflowMode = TextOverflowModes.Ellipsis;
+        titleText.text = title;
+
+        Transform existingType = root.Find("TypeText");
+        if (existingType != null)
+            existingType.gameObject.SetActive(false);
+
+        TMP_Text dueText = EnsureText(root, "DueText", 24f, TextAlignmentOptions.MidlineRight, new Color32(62, 64, 68, 255));
+        RectTransform dueRt = dueText.GetComponent<RectTransform>();
+        dueRt.anchorMin = new Vector2(0.68f, 0f);
+        dueRt.anchorMax = new Vector2(1f, 1f);
+        dueRt.offsetMin = new Vector2(8f, 0f);
+        dueRt.offsetMax = Vector2.zero;
+        dueText.textWrappingMode = TextWrappingModes.NoWrap;
+        dueText.overflowMode = TextOverflowModes.Ellipsis;
+        dueText.text = dueLine;
+
+        TMP_Text doneText = EnsureText(root, "DoneText", 22f, TextAlignmentOptions.Center, new Color32(34, 34, 34, 255));
+        RectTransform doneRt = doneText.GetComponent<RectTransform>();
+        doneRt.anchorMin = new Vector2(0.58f, 0f);
+        doneRt.anchorMax = new Vector2(0.68f, 1f);
+        doneRt.offsetMin = Vector2.zero;
+        doneRt.offsetMax = Vector2.zero;
+        doneText.fontStyle = FontStyles.Bold;
+        doneText.text = isCompleted ? "DONE" : string.Empty;
+    }
+
+    private static TMP_Text EnsureText(Transform parent, string name, float fontSize, TextAlignmentOptions alignment, Color color)
+    {
+        Transform child = parent.Find(name);
+        if (child == null)
+        {
+            GameObject textObj = new GameObject(name, typeof(RectTransform), typeof(TextMeshProUGUI));
+            textObj.transform.SetParent(parent, false);
+            child = textObj.transform;
+        }
+
+        TMP_Text text = child.GetComponent<TMP_Text>();
+        if (text == null)
+            text = child.gameObject.AddComponent<TextMeshProUGUI>();
+
+        text.fontSize = fontSize;
+        text.alignment = alignment;
+        text.color = color;
+        return text;
+    }
+
+    private static string MapTypeToBadge(string assignmentType)
+    {
+        string raw = string.IsNullOrWhiteSpace(assignmentType) ? string.Empty : assignmentType.Trim().ToLowerInvariant();
+        if (raw.Contains("multiple")) return "TEST";
+        if (raw.Contains("yes") || raw.Contains("no") || raw.Contains("true") || raw.Contains("false")) return "TEST";
+        if (raw.Contains("quiz")) return "TEST";
+        return "ACTIVITY";
+    }
+
+    private IEnumerator HydrateDueDatesFromModern(int classId, List<AssignmentTypeData> categories)
+    {
+        if (categories == null || categories.Count == 0)
+            yield break;
+
+        bool needsHydration = false;
+        for (int i = 0; i < categories.Count; i++)
+        {
+            string due = categories[i] != null ? categories[i].due_date_text : string.Empty;
+            if (string.IsNullOrWhiteSpace(due) || due.Trim().Equals("No deadline", StringComparison.OrdinalIgnoreCase))
+            {
+                needsHydration = true;
+                break;
+            }
+        }
+
+        if (!needsHydration)
+            yield break;
+
+        List<string> apiBases = BuildCandidateApiBases();
+        for (int i = 0; i < apiBases.Count; i++)
+        {
+            string baseApi = apiBases[i];
+            string getEndpoint = baseApi + "/student/assignments?student_id=" + studentId + "&class_id=" + classId;
+
+            List<AssignmentTypeData> parsed = null;
+            using (UnityWebRequest req = UnityWebRequest.Get(getEndpoint))
+            {
+                req.timeout = 12;
+                yield return req.SendWebRequest();
+                if (req.result == UnityWebRequest.Result.Success)
+                {
+                    string body = req.downloadHandler != null ? req.downloadHandler.text : string.Empty;
+                    parsed = ParseAssignmentTypesFromModern(body);
+                }
+            }
+
+            if (parsed == null || parsed.Count == 0)
+            {
+                string postEndpoint = baseApi + "/student/assignments";
+                string payload = "{\"student_id\":" + studentId + ",\"class_id\":" + classId + "}";
+                using (UnityWebRequest req = new UnityWebRequest(postEndpoint, "POST"))
+                {
+                    req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(payload));
+                    req.downloadHandler = new DownloadHandlerBuffer();
+                    req.SetRequestHeader("Content-Type", "application/json");
+                    req.timeout = 12;
+
+                    yield return req.SendWebRequest();
+                    if (req.result == UnityWebRequest.Result.Success)
+                    {
+                        string body = req.downloadHandler != null ? req.downloadHandler.text : string.Empty;
+                        parsed = ParseAssignmentTypesFromModern(body);
+                    }
+                }
+            }
+
+            if (parsed != null && parsed.Count > 0)
+            {
+                int hydrated = MergeDueDates(categories, parsed);
+                if (hydrated > 0)
+                {
+                    PlayerPrefs.SetString("ApiBaseUrl", baseApi);
+                    PlayerPrefs.Save();
+                    yield break;
+                }
+            }
+        }
+    }
+
+    private static int MergeDueDates(List<AssignmentTypeData> target, List<AssignmentTypeData> source)
+    {
+        if (target == null || source == null)
+            return 0;
+
+        Dictionary<int, string> sourceDueById = new Dictionary<int, string>();
+        for (int i = 0; i < source.Count; i++)
+        {
+            AssignmentTypeData src = source[i];
+            if (src == null || src.category_id <= 0)
+                continue;
+
+            if (!string.IsNullOrWhiteSpace(src.due_date_text) &&
+                !src.due_date_text.Trim().Equals("No deadline", StringComparison.OrdinalIgnoreCase))
+            {
+                sourceDueById[src.category_id] = src.due_date_text.Trim();
+            }
+        }
+
+        int updated = 0;
+        for (int i = 0; i < target.Count; i++)
+        {
+            AssignmentTypeData dst = target[i];
+            if (dst == null || dst.category_id <= 0)
+                continue;
+
+            if (sourceDueById.TryGetValue(dst.category_id, out string dueText))
+            {
+                dst.due_date_text = dueText;
+                updated++;
+            }
+
+            for (int j = 0; j < source.Count; j++)
+            {
+                AssignmentTypeData src = source[j];
+                if (src == null || src.category_id != dst.category_id)
+                    continue;
+
+                if (src.is_completed)
+                    dst.is_completed = true;
+                break;
+            }
+        }
+
+        return updated;
+    }
+
+    private static string ResolveDueDateText(AssignmentServerItem item)
+    {
+        if (item == null)
+            return "No deadline";
+
+        string preformatted = SafeString(item.due_date_display, SafeString(item.deadline_display, SafeString(item.deadlineDisplay, string.Empty)));
+        if (!string.IsNullOrWhiteSpace(preformatted))
+            return preformatted;
+
+        string raw = SafeString(item.due_date, SafeString(item.deadline, SafeString(item.due_at, SafeString(item.dueDate, string.Empty))));
+        return FormatDueDate(raw);
+    }
+
+    private static bool ResolveSubmissionStatus(AssignmentServerItem item)
+    {
+        if (item == null)
+            return false;
+
+        return item.is_submitted || item.isSubmitted || item.is_completed;
+    }
+
+    private static string ResolveDueDateText(LegacyAssignmentItem item)
+    {
+        if (item == null)
+            return "No deadline";
+
+        string preformatted = SafeString(item.due_date_display, SafeString(item.deadline_display, SafeString(item.deadlineDisplay, string.Empty)));
+        if (!string.IsNullOrWhiteSpace(preformatted))
+            return preformatted;
+
+        string raw = SafeString(item.due_date, SafeString(item.deadline, SafeString(item.due_at, SafeString(item.dueDate, string.Empty))));
+        return FormatDueDate(raw);
+    }
+
+    private static string ResolveSubjectDueDate(StudentSubjectData subject)
+    {
+        if (subject == null)
+            return "No deadline";
+
+        if (!string.IsNullOrWhiteSpace(subject.latest_activity_due_date_display))
+            return subject.latest_activity_due_date_display.Trim();
+
+        string raw = SafeString(subject.latest_activity_due_date,
+                    SafeString(subject.activity_due_date,
+                    SafeString(subject.latest_activity_deadline, string.Empty)));
+
+        return FormatDueDate(raw);
+    }
+
+    private string ResolveClassDueDateByClassId(int classId)
+    {
+        foreach (var item in classroomDataByRoom)
+        {
+            ClassroomData classroom = item.Value;
+            if (classroom == null)
+                continue;
+
+            if (classroom.class_id == classId)
+                return string.IsNullOrWhiteSpace(classroom.dueDate) ? "No deadline" : classroom.dueDate;
+        }
+
+        return "No deadline";
+    }
+
+    private static string FormatDueDate(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return "No deadline";
+
+        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out DateTime parsed) ||
+            DateTime.TryParse(raw, out parsed))
+        {
+            return parsed.ToString("MMM dd, yyyy hh:mm tt", CultureInfo.InvariantCulture);
+        }
+
+        return raw.Trim();
+    }
+
+    private static string SafeString(string value, string fallback)
+    {
+        return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
     }
 }
 
