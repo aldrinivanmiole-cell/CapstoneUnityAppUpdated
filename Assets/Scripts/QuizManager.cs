@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using UnityEngine.SceneManagement;
 using UnityEngine.Networking;
 using System;
+using System.Text;
 #if UNITY_EDITOR
 using UnityEditor.SceneManagement;
 #endif
@@ -146,6 +147,8 @@ public class QuizManager : MonoBehaviour
     private TextMeshProUGUI storyLineCounterText;
     private Button storyNextButton;
     private Button storyStartButton;
+    private TMP_FontAsset storyFontAsset;
+    private Material storyFontMaterial;
     private const string LastMiniGameSceneKey = "Quiz_LastMiniGameScene";
 
     void Start()
@@ -1003,7 +1006,7 @@ public class QuizManager : MonoBehaviour
             resultPanel.SetActive(false);
 
         if (storyIntroTitleText != null)
-            storyIntroTitleText.text = "Story Time!";
+            storyIntroTitleText.text = "Story Time";
 
         StartCoroutine(AnimateStoryIntroPanel(true));
         StartCoroutine(ShowStoryLine());
@@ -1022,7 +1025,7 @@ public class QuizManager : MonoBehaviour
 
         return new List<string>
         {
-            $"Hi {studentName}! Welcome to Rainbow Quiz Park!",
+            SanitizeStoryText($"Hi {studentName}! Welcome to Rainbow Quiz Park!"),
             lessonLine,
             "Each good answer helps your lantern glow brighter.",
             "Take your time, read carefully, and enjoy learning!"
@@ -1082,7 +1085,7 @@ public class QuizManager : MonoBehaviour
         }
 
         if (storyIntroBodyText != null)
-            storyIntroBodyText.text = storyIntroLines[storyIntroIndex];
+            storyIntroBodyText.text = SanitizeStoryText(storyIntroLines[storyIntroIndex]);
 
         storyLineFullyShown = true;
         UpdateStoryFooter(true);
@@ -1135,7 +1138,7 @@ public class QuizManager : MonoBehaviour
         if (storyIntroHintText != null)
         {
             storyIntroHintText.gameObject.SetActive(lineReady && !lastLine);
-            storyIntroHintText.text = "Tap to Continue ▸";
+            storyIntroHintText.text = "Tap to Continue";
         }
 
         if (storyNextButton != null)
@@ -1234,6 +1237,9 @@ public class QuizManager : MonoBehaviour
         if (canvas == null)
             return;
 
+        storyFontAsset = questionText != null ? questionText.font : null;
+        storyFontMaterial = questionText != null ? questionText.fontSharedMaterial : null;
+
         storyIntroPanel = new GameObject("QuizStoryIntroPanel");
         storyIntroPanel.transform.SetParent(canvas.transform, false);
         storyIntroPanel.transform.SetAsLastSibling();
@@ -1257,7 +1263,7 @@ public class QuizManager : MonoBehaviour
         RectTransform popupRect = popupObj.AddComponent<RectTransform>();
         popupRect.anchorMin = new Vector2(0.5f, 0.5f);
         popupRect.anchorMax = new Vector2(0.5f, 0.5f);
-        popupRect.sizeDelta = new Vector2(860f, 520f);
+        popupRect.sizeDelta = new Vector2(960f, 620f);
         popupRect.anchoredPosition = Vector2.zero;
 
         Image popupImage = popupObj.AddComponent<Image>();
@@ -1269,15 +1275,15 @@ public class QuizManager : MonoBehaviour
         popupShadow.effectColor = new Color(0f, 0f, 0f, 0.28f);
         popupShadow.effectDistance = new Vector2(10f, -10f);
 
-        storyIntroTitleText = CreateStoryText("Title", popupObj.transform, new Vector2(0.5f, 0.84f), new Vector2(620f, 70f), 42, FontStyles.Bold, new Color(0.35f, 0.2f, 0.08f, 1f), TextAlignmentOptions.Center);
-        storyIntroBodyText = CreateStoryText("Body", popupObj.transform, new Vector2(0.5f, 0.53f), new Vector2(680f, 220f), 34, FontStyles.Normal, new Color(0.28f, 0.18f, 0.1f, 1f), TextAlignmentOptions.Center);
-        storyIntroHintText = CreateStoryText("Hint", popupObj.transform, new Vector2(0.38f, 0.14f), new Vector2(260f, 44f), 24, FontStyles.Bold, new Color(0.34f, 0.22f, 0.12f, 1f), TextAlignmentOptions.Center);
-        storyLineCounterText = CreateStoryText("LineCounter", popupObj.transform, new Vector2(0.16f, 0.14f), new Vector2(110f, 44f), 24, FontStyles.Bold, new Color(0.42f, 0.28f, 0.16f, 0.8f), TextAlignmentOptions.Center);
+        storyIntroTitleText = CreateStoryText("Title", popupObj.transform, new Vector2(0.5f, 0.84f), new Vector2(720f, 84f), 50, FontStyles.Bold, new Color(0.35f, 0.2f, 0.08f, 1f), TextAlignmentOptions.Center);
+        storyIntroTitleText.text = "Story Time";
 
-        CreateStoryText("Mascot", popupObj.transform, new Vector2(0.15f, 0.52f), new Vector2(150f, 150f), 74, FontStyles.Bold, new Color(0.48f, 0.26f, 0.08f, 1f), TextAlignmentOptions.Center).text = "★";
+        storyIntroBodyText = CreateStoryText("Body", popupObj.transform, new Vector2(0.5f, 0.54f), new Vector2(760f, 270f), 40, FontStyles.Normal, new Color(0.28f, 0.18f, 0.1f, 1f), TextAlignmentOptions.Center);
+        storyIntroHintText = CreateStoryText("Hint", popupObj.transform, new Vector2(0.39f, 0.12f), new Vector2(280f, 48f), 26, FontStyles.Bold, new Color(0.34f, 0.22f, 0.12f, 1f), TextAlignmentOptions.Center);
+        storyLineCounterText = CreateStoryText("LineCounter", popupObj.transform, new Vector2(0.17f, 0.12f), new Vector2(130f, 48f), 26, FontStyles.Bold, new Color(0.42f, 0.28f, 0.16f, 0.8f), TextAlignmentOptions.Center);
 
-        storyNextButton = CreateStoryButton("StoryNextButton", popupObj.transform, new Vector2(0.83f, 0.14f), new Vector2(150f, 58f), new Color(0.82f, 0.56f, 0.2f, 1f), "Next", OnStoryAdvanceRequested);
-        storyStartButton = CreateStoryButton("StartActivityButton", popupObj.transform, new Vector2(0.5f, 0.14f), new Vector2(280f, 66f), new Color(0.2f, 0.72f, 0.24f, 1f), "Start Activity!", OnStoryStartRequested);
+        storyNextButton = CreateStoryButton("StoryNextButton", popupObj.transform, new Vector2(0.83f, 0.12f), new Vector2(170f, 66f), new Color(0.82f, 0.56f, 0.2f, 1f), "Next", OnStoryAdvanceRequested);
+        storyStartButton = CreateStoryButton("StartActivityButton", popupObj.transform, new Vector2(0.5f, 0.12f), new Vector2(320f, 74f), new Color(0.2f, 0.72f, 0.24f, 1f), "Start Activity", OnStoryStartRequested);
         storyStartButton.gameObject.SetActive(false);
 
         storyIntroPanel.SetActive(false);
@@ -1300,6 +1306,10 @@ public class QuizManager : MonoBehaviour
         text.color = color;
         text.alignment = alignment;
         text.enableWordWrapping = true;
+        if (storyFontAsset != null)
+            text.font = storyFontAsset;
+        if (storyFontMaterial != null)
+            text.fontSharedMaterial = storyFontMaterial;
         return text;
     }
 
@@ -1322,9 +1332,28 @@ public class QuizManager : MonoBehaviour
         Button button = obj.AddComponent<Button>();
         button.onClick.AddListener(action);
 
-        TextMeshProUGUI text = CreateStoryText("Text", obj.transform, new Vector2(0.5f, 0.5f), size, 26, FontStyles.Bold, Color.white, TextAlignmentOptions.Center);
-        text.text = label;
+        TextMeshProUGUI text = CreateStoryText("Text", obj.transform, new Vector2(0.5f, 0.5f), size, 30, FontStyles.Bold, Color.white, TextAlignmentOptions.Center);
+        text.text = SanitizeStoryText(label);
         return button;
+    }
+
+    private string SanitizeStoryText(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return string.Empty;
+
+        StringBuilder builder = new StringBuilder(value.Length);
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            if (c == '\r')
+                continue;
+
+            if (c == '\n' || (c >= 32 && c <= 126))
+                builder.Append(c);
+        }
+
+        return builder.ToString().Trim();
     }
 
     private void SetGameplayInteractable(bool interactable)
