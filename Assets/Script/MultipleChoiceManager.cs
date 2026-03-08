@@ -22,6 +22,15 @@ public class MCQuestion
     public string tutorial_link; // Tutorial link from database
     public string difficulty;  // NEW: "easy", "medium", or "hard"
     public List<MCAnswer> choices;
+    public List<MCAnswer> answers;
+}
+
+[System.Serializable]
+public class MCQuestionEnvelope
+{
+    public List<MCQuestion> questions;
+    public List<MCQuestion> items;
+    public List<MCQuestion> data;
 }
 
 [System.Serializable]
@@ -48,6 +57,7 @@ public class MultipleChoiceManager : MonoBehaviour
 
     [Header("Tutorial")]
     public Button tutorialButton;
+    public TMP_Text tutorialText;
 
     [Header("Confirmation Dialog - NEW!")]
     [SerializeField] private GameObject confirmationDialog;
@@ -67,6 +77,12 @@ public class MultipleChoiceManager : MonoBehaviour
     [SerializeField] private float fadeSpeed = 3f;
     [SerializeField] private float levelCompleteDuration = 2.5f;
     [SerializeField] private float scaleAnimationSpeed = 2f;
+    [SerializeField] private bool autoAdvanceAfterAnswer = true;
+
+    [Header("Story Intro")]
+    [SerializeField] private bool enableStoryIntro = true;
+    [SerializeField] private float storyFadeDuration = 0.22f;
+    [SerializeField] private float storyTypeSpeed = 0.02f;
 
     private List<MCQuestion> questions = new List<MCQuestion>();
     private int currentIndex = 0;
@@ -74,6 +90,8 @@ public class MultipleChoiceManager : MonoBehaviour
     private int studentId;
     private int assignmentId;
     private bool isTransitioning = false;
+    private bool finalScoreHandled = false;
+    private float quizStartRealtime;
 
     // Programmatically created UI elements
     private CanvasGroup mainCanvasGroup;
@@ -86,12 +104,38 @@ public class MultipleChoiceManager : MonoBehaviour
     private List<int> lockedQuestions = new List<int>();  // Track locked question indices
     private MCAnswer pendingAnswer = null;  // Answer waiting for confirmation
     private string saveKey = "";  // PlayerPrefs key for saving progress
+    private bool isStoryIntroActive = false;
+    private int storyIntroIndex = 0;
+    private List<string> storyIntroLines = new List<string>();
+    private bool storyLineFullyShown = false;
+    private Coroutine storyTypingCoroutine;
+
+    // Programmatically created story UI
+    private GameObject storyIntroPanel;
+    private CanvasGroup storyIntroCanvasGroup;
+    private TMP_Text storyIntroTitleText;
+    private TMP_Text storyIntroBodyText;
+    private TMP_Text storyIntroHintText;
 
     void Start()
     {
-        studentId = SessionManager.Instance.StudentId;
-        assignmentId = CurrentClassSession.SelectedCategoryId;
+        ResolveTutorialReferences();
+
+        studentId = ResolveStudentId();
+        assignmentId = ResolveAssignmentId();
+        quizStartRealtime = Time.realtimeSinceStartup;
         saveKey = $"assignment_progress_{assignmentId}_{studentId}";
+
+        if (studentId <= 0 || assignmentId <= 0)
+        {
+            Debug.LogError($"MultipleChoiceManager: Missing context. studentId={studentId}, assignmentId={assignmentId}");
+            if (questionText != null)
+                questionText.text = "Unable to load activity. Please return and select a teacher activity again.";
+            if (progressText != null)
+                progressText.text = "No activity selected";
+            SetTutorialUiVisible(false);
+            return;
+        }
 
         // Initialize animation system
         InitializeAnimationSystem();
@@ -112,7 +156,11 @@ public class MultipleChoiceManager : MonoBehaviour
 
         // Setup tutorial button
         if (tutorialButton != null)
+        {
             tutorialButton.onClick.AddListener(OpenTutorialLink);
+        }
+
+        SetTutorialUiVisible(false);
 
         // NEW: Setup navigation buttons
         if (previousButton != null)
@@ -133,33 +181,164 @@ public class MultipleChoiceManager : MonoBehaviour
 
     IEnumerator LoadQuestions()
     {
-        string url = $"https://homequest-c3k7.onrender.com/get_questions?student_id={studentId}&assignment_id={assignmentId}";
-        using (UnityWebRequest www = UnityWebRequest.Get(url))
+        string baseApi = ResolveApiBaseUrl();
+        string[] urls =
         {
-            yield return www.SendWebRequest();
+            baseApi + $"/get_questions?student_id={studentId}&assignment_id={assignmentId}",
+            baseApi + $"/api/questions?student_id={studentId}&category_id={assignmentId}"
+        };
 
-            if (www.result != UnityWebRequest.Result.Success)
+        string lastError = "";
+        for (int i = 0; i < urls.Length && (questions == null || questions.Count == 0); i++)
+        {
+            string url = urls[i];
+            using (UnityWebRequest www = UnityWebRequest.Get(url))
             {
-                Debug.LogError("Failed to load questions: " + www.error);
-                yield break;
+                yield return www.SendWebRequest();
+
+                if (www.result != UnityWebRequest.Result.Success)
+                {
+                    lastError = string.IsNullOrWhiteSpace(www.error) ? "request failed" : www.error;
+                    continue;
+                }
+
+                string json = www.downloadHandler.text;
+                questions = ParseQuestions(json);
+                NormalizeQuestions();
+
+                if (questions != null && questions.Count > 0)
+                {
+                    PlayerPrefs.SetString("ApiBaseUrl", baseApi);
+                    PlayerPrefs.Save();
+                    break;
+                }
             }
+        }
 
-            string json = www.downloadHandler.text;
-            questions = JsonUtilityWrapper.FromJsonList<MCQuestion>(json);
+        if (questions == null)
+            questions = new List<MCQuestion>();
 
-            if (questions.Count > 0)
+        if (questions.Count > 0)
+        {
+            studentAnswers = new List<string>();
+            for (int i = 0; i < questions.Count; i++)
+                studentAnswers.Add("");
+
+            LoadProgress();
+            if (enableStoryIntro)
             {
-                // NEW: Initialize answers list
-                studentAnswers = new List<string>();
-                for (int i = 0; i < questions.Count; i++)
-                    studentAnswers.Add("");  // Empty = not answered yet
-
-                // NEW: Try to load saved progress
-                LoadProgress();
-
+                StartStoryIntro();
+            }
+            else
+            {
                 ShowQuestion();
                 UpdateNavigationButtons();
             }
+            yield break;
+        }
+
+        Debug.LogError("MultipleChoiceManager: No questions loaded. " + lastError);
+        if (questionText != null)
+            questionText.text = "No teacher questions found for this activity yet.";
+        if (progressText != null)
+            progressText.text = "Question 0/0";
+        SetTutorialUiVisible(false);
+    }
+
+    private int ResolveStudentId()
+    {
+        if (SessionManager.Instance != null && SessionManager.Instance.StudentId > 0)
+            return SessionManager.Instance.StudentId;
+
+        int id = PlayerPrefs.GetInt("SESSION_STUDENT_ID", 0);
+        if (id > 0)
+            return id;
+
+        id = PlayerPrefs.GetInt("StudentID", 0);
+        if (id > 0)
+            return id;
+
+        return PlayerPrefs.GetInt("student_id", 0);
+    }
+
+    private int ResolveAssignmentId()
+    {
+        if (CurrentClassSession.SelectedCategoryId > 0)
+            return CurrentClassSession.SelectedCategoryId;
+
+        int id = PlayerPrefs.GetInt("CategoryId", 0);
+        if (id > 0)
+            return id;
+
+        id = PlayerPrefs.GetInt("AssignmentID", 0);
+        if (id > 0)
+            return id;
+
+        string selectedActivity = PlayerPrefs.GetString("SelectedActivity", string.Empty);
+        if (int.TryParse(selectedActivity, out id) && id > 0)
+            return id;
+
+        return 0;
+    }
+
+    private string ResolveApiBaseUrl()
+    {
+        string configured = PlayerPrefs.GetString("ApiBaseUrl", string.Empty);
+        if (!string.IsNullOrWhiteSpace(configured))
+            return configured.Trim().TrimEnd('/');
+
+        return "https://homequest-c3k7.onrender.com";
+    }
+
+    private List<MCQuestion> ParseQuestions(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return new List<MCQuestion>();
+
+        string raw = json.Trim();
+        try
+        {
+            if (raw.StartsWith("["))
+                return JsonUtilityWrapper.FromJsonList<MCQuestion>(raw) ?? new List<MCQuestion>();
+
+            MCQuestionEnvelope envelope = JsonUtility.FromJson<MCQuestionEnvelope>(raw);
+            if (envelope != null)
+            {
+                if (envelope.questions != null && envelope.questions.Count > 0)
+                    return envelope.questions;
+                if (envelope.items != null && envelope.items.Count > 0)
+                    return envelope.items;
+                if (envelope.data != null && envelope.data.Count > 0)
+                    return envelope.data;
+            }
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogWarning("MultipleChoiceManager: Failed to parse questions payload: " + ex.Message);
+        }
+
+        return new List<MCQuestion>();
+    }
+
+    private void NormalizeQuestions()
+    {
+        if (questions == null)
+            return;
+
+        for (int i = 0; i < questions.Count; i++)
+        {
+            MCQuestion q = questions[i];
+            if (q == null)
+                continue;
+
+            if (q.choices == null || q.choices.Count == 0)
+                q.choices = q.answers ?? new List<MCAnswer>();
+
+            if (string.IsNullOrWhiteSpace(q.question_description))
+                q.question_description = "Question unavailable";
+
+            if (string.IsNullOrWhiteSpace(q.difficulty))
+                q.difficulty = "easy";
         }
     }
 
@@ -227,8 +406,7 @@ public class MultipleChoiceManager : MonoBehaviour
         }
 
         // Show tutorial button if link exists
-        if (tutorialButton != null)
-            tutorialButton.gameObject.SetActive(!string.IsNullOrEmpty(q.tutorial_link));
+        SetTutorialUiVisible(!string.IsNullOrWhiteSpace(q.tutorial_link));
 
         // NEW: Update navigation buttons
         UpdateNavigationButtons();
@@ -268,6 +446,14 @@ public class MultipleChoiceManager : MonoBehaviour
             }
         }
 
+        HistoryLocalStore.AddEntry(
+            studentId,
+            question.question_description,
+            pendingAnswer.answer_description,
+            correctAnswer,
+            isCorrect
+        );
+
         StartCoroutine(SaveAnswerToHistory(studentId, question.id, question.question_description, 
             pendingAnswer.answer_description, correctAnswer, isCorrect ? 1 : 0));
 
@@ -281,11 +467,18 @@ public class MultipleChoiceManager : MonoBehaviour
         confirmationDialog.SetActive(false);
         pendingAnswer = null;
 
-        // Refresh current question to show selection
-        ShowQuestion();
-        
-        // Update navigation buttons (to check if button text should change)
-        UpdateNavigationButtons();
+        if (autoAdvanceAfterAnswer && currentIndex < questions.Count - 1)
+        {
+            StartCoroutine(AnimateQuestionTransition(currentIndex + 1));
+        }
+        else
+        {
+            // Refresh current question to show selection
+            ShowQuestion();
+            
+            // Update navigation buttons (to check if button text should change)
+            UpdateNavigationButtons();
+        }
     }
 
     void OnConfirmNo()
@@ -297,18 +490,20 @@ public class MultipleChoiceManager : MonoBehaviour
 
     IEnumerator SaveAnswerToHistory(int studentId, int questionId, string question, string playerAnswer, string correctAnswer, int isCorrect)
     {
-        int assignmentId = (questions.Count > 0) ? questions[0].assignment_id : 0;
+        int assignmentForPost = assignmentId > 0
+            ? assignmentId
+            : ((questions.Count > 0) ? questions[0].assignment_id : 0);
         
         WWWForm form = new WWWForm();
         form.AddField("student_id", studentId);
-        form.AddField("assignment_id", assignmentId);
+        form.AddField("assignment_id", assignmentForPost);
         form.AddField("question_id", questionId);
         form.AddField("question_text", question);
         form.AddField("student_answer", playerAnswer);
         form.AddField("correct_answer", correctAnswer);
         form.AddField("is_correct", isCorrect);
 
-        using (UnityWebRequest www = UnityWebRequest.Post("https://homequest-c3k7.onrender.com/save_history", form))
+        using (UnityWebRequest www = UnityWebRequest.Post(ResolveApiBaseUrl() + "/save_history", form))
         {
             yield return www.SendWebRequest();
             if (www.result != UnityWebRequest.Result.Success)
@@ -320,58 +515,156 @@ public class MultipleChoiceManager : MonoBehaviour
 
    IEnumerator SaveScore()
 {
-    // Show finish panel with score
-    finishPanel.SetActive(true);
-    
+    if (finalScoreHandled)
+    {
+        yield break;
+    }
+    finalScoreHandled = true;
+
+    if (finishPanel != null)
+        finishPanel.SetActive(true);
+
+    int totalQuestions = Mathf.Max(questions.Count, 1);
+
     if (scoreText != null)
     {
-        scoreText.text = $"You got {correctCount} out of {questions.Count} correct!";
+        scoreText.text = $"You got {correctCount} out of {totalQuestions} correct!";
         scoreText.color = Color.white;
         scoreText.fontSize = 36;
         scoreText.gameObject.SetActive(true);
     }
-    
-    Debug.Log($"Final Score: {correctCount}/{questions.Count}");
 
-    // Calculate percentage score for trophy system
-    int percentageScore = (questions.Count > 0) ? (correctCount * 100) / questions.Count : 0;
+    Debug.Log($"Final Score: {correctCount}/{totalQuestions}");
+
+    int percentageScore = (correctCount * 100) / totalQuestions;
     PlayerPrefs.SetInt("PlayerScore", percentageScore);
     PlayerPrefs.Save();
     Debug.Log($"✅ Score saved to PlayerPrefs: {percentageScore}%");
 
-    int assignmentId = (questions.Count > 0) ? questions[0].assignment_id : 0;
+    int elapsedSeconds = Mathf.Max(1, Mathf.RoundToInt(Time.realtimeSinceStartup - quizStartRealtime));
+    string studentName = ResolveStudentDisplayName();
+    LeaderboardStore.UpsertCompletion(studentId.ToString(), studentName, percentageScore, elapsedSeconds);
+
+    int assignmentForPost = assignmentId > 0
+        ? assignmentId
+        : ((questions.Count > 0) ? questions[0].assignment_id : 0);
 
     WWWForm form = new WWWForm();
     form.AddField("student_id", studentId);
-    form.AddField("assignment_id", assignmentId);
-    form.AddField("score", correctCount); // Send the total correct answers as score
+    form.AddField("assignment_id", assignmentForPost);
+    form.AddField("score", correctCount);
+    form.AddField("total_points", totalQuestions);
 
-    using (UnityWebRequest www = UnityWebRequest.Post("https://homequest-c3k7.onrender.com/submit_score", form))
+    bool submitted = false;
+    using (UnityWebRequest www = UnityWebRequest.Post(ResolveApiBaseUrl() + "/submit_score2", form))
     {
         yield return www.SendWebRequest();
+        submitted = LegacyApiResponseValidator.WasSuccessful(www, "MultipleChoiceManager.submit_score2");
 
-        if (www.result != UnityWebRequest.Result.Success)
-            Debug.LogError("❌ Error saving score: " + www.error);
-        else
-            Debug.Log("✅ Score saved successfully: " + www.downloadHandler.text);
+        if (!submitted)
+            Debug.LogWarning("MultipleChoiceManager: submit_score2 failed, falling back to submit_score.");
     }
 
-    // Wait 5 seconds then navigate to gameresult scene
-    yield return new WaitForSeconds(5f);
-    SceneManager.LoadScene("gameresult");
+    if (!submitted)
+    {
+        using (UnityWebRequest fallback = UnityWebRequest.Post(ResolveApiBaseUrl() + "/submit_score", form))
+        {
+            yield return fallback.SendWebRequest();
+
+            if (!LegacyApiResponseValidator.WasSuccessful(fallback, "MultipleChoiceManager.submit_score"))
+                Debug.LogError("❌ Error saving score: " + fallback.error + " Response: " + (fallback.downloadHandler != null ? fallback.downloadHandler.text : string.Empty));
+            else
+                Debug.Log("✅ Score saved successfully: " + fallback.downloadHandler.text);
+        }
+    }
+
+    NavigateToGameResult(correctCount, totalQuestions, elapsedSeconds);
 }
+
+    private void NavigateToGameResult(int score, int totalQuestions, int elapsedSeconds)
+    {
+        int clampedTotal = Mathf.Max(totalQuestions, 1);
+        int wrongCount = Mathf.Max(0, clampedTotal - score);
+        GameResultState.SetResult(score, clampedTotal, wrongCount, elapsedSeconds, string.Empty, "NewMap");
+        SceneManager.LoadScene("GameResult");
+    }
+
+    private string ResolveStudentDisplayName()
+    {
+        string studentName = SessionManager.Instance != null ? SessionManager.Instance.Username : string.Empty;
+        if (string.IsNullOrWhiteSpace(studentName))
+        {
+            studentName = PlayerPrefs.GetString("SESSION_USERNAME", string.Empty);
+        }
+
+        if (string.IsNullOrWhiteSpace(studentName))
+        {
+            return studentId > 0 ? $"Student {studentId}" : "Student";
+        }
+
+        return studentName.Trim();
+    }
 
     void OpenTutorialLink()
     {
         if (currentIndex < questions.Count)
         {
-            string link = questions[currentIndex].tutorial_link;
-            if (!string.IsNullOrEmpty(link))
+            string link = (questions[currentIndex].tutorial_link ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(link))
             {
                 Application.OpenURL(link);
                 Debug.Log("Opening tutorial link: " + link);
             }
         }
+    }
+
+    private void ResolveTutorialReferences()
+    {
+        if (tutorialButton == null)
+        {
+            Transform direct = transform.Find("HelpButton");
+            if (direct == null)
+                direct = transform.Find("HelpIcon");
+            if (direct != null)
+                tutorialButton = direct.GetComponent<Button>();
+        }
+
+        if (tutorialText == null)
+        {
+            Transform direct = transform.Find("HelpText");
+            if (direct == null)
+                direct = FindDeepChild(transform, "HelpText");
+            if (direct != null)
+                tutorialText = direct.GetComponent<TMP_Text>();
+        }
+    }
+
+    private void SetTutorialUiVisible(bool visible)
+    {
+        if (tutorialButton != null)
+            tutorialButton.gameObject.SetActive(visible);
+
+        if (tutorialText != null)
+            tutorialText.gameObject.SetActive(visible);
+    }
+
+    private static Transform FindDeepChild(Transform parent, string name)
+    {
+        if (parent == null)
+            return null;
+
+        for (int i = 0; i < parent.childCount; i++)
+        {
+            Transform child = parent.GetChild(i);
+            if (child.name == name)
+                return child;
+
+            Transform nested = FindDeepChild(child, name);
+            if (nested != null)
+                return nested;
+        }
+
+        return null;
     }
 
     // ========== NEW NAVIGATION FUNCTIONS ==========
@@ -388,6 +681,13 @@ public class MultipleChoiceManager : MonoBehaviour
     void OnNextClicked()
     {
         if (isTransitioning) return;
+
+        if (isStoryIntroActive)
+        {
+            AdvanceStoryIntro();
+            return;
+        }
+
         if (currentIndex >= questions.Count - 1) return;
 
         // Get current difficulty
@@ -412,6 +712,308 @@ public class MultipleChoiceManager : MonoBehaviour
         {
             // Same difficulty - animate transition
             StartCoroutine(AnimateQuestionTransition(currentIndex + 1));
+        }
+    }
+
+    private void StartStoryIntro()
+    {
+        EnsureStoryIntroUi();
+
+        storyIntroLines = BuildStoryIntroLines();
+        storyIntroIndex = 0;
+        isStoryIntroActive = storyIntroLines != null && storyIntroLines.Count > 0;
+
+        if (!isStoryIntroActive)
+        {
+            ShowQuestion();
+            UpdateNavigationButtons();
+            return;
+        }
+
+        SetChoicesVisible(false);
+        SetTutorialUiVisible(false);
+
+        if (submitButton != null)
+            submitButton.gameObject.SetActive(false);
+
+        if (previousButton != null)
+            previousButton.gameObject.SetActive(false);
+
+        if (nextButton != null)
+            nextButton.gameObject.SetActive(true);
+
+        if (storyIntroTitleText != null)
+            storyIntroTitleText.text = "Story Time";
+
+        if (storyIntroPanel != null)
+            storyIntroPanel.SetActive(true);
+
+        StartCoroutine(AnimateStoryIntroPanel(true));
+        RenderStoryIntroLine();
+    }
+
+    private void AdvanceStoryIntro()
+    {
+        if (!storyLineFullyShown)
+        {
+            CompleteStoryLineInstant();
+            return;
+        }
+
+        storyIntroIndex++;
+        if (storyIntroIndex >= storyIntroLines.Count)
+        {
+            isStoryIntroActive = false;
+            storyIntroIndex = 0;
+
+            if (storyTypingCoroutine != null)
+            {
+                StopCoroutine(storyTypingCoroutine);
+                storyTypingCoroutine = null;
+            }
+
+            StartCoroutine(AnimateStoryIntroPanel(false));
+
+            if (previousButton != null)
+                previousButton.gameObject.SetActive(true);
+
+            ShowQuestion();
+            UpdateNavigationButtons();
+            return;
+        }
+
+        RenderStoryIntroLine();
+    }
+
+    private void RenderStoryIntroLine()
+    {
+        string line = storyIntroIndex < storyIntroLines.Count ? storyIntroLines[storyIntroIndex] : string.Empty;
+        storyLineFullyShown = false;
+
+        if (storyTypingCoroutine != null)
+        {
+            StopCoroutine(storyTypingCoroutine);
+            storyTypingCoroutine = null;
+        }
+
+        if (storyIntroBodyText != null)
+        {
+            storyTypingCoroutine = StartCoroutine(TypeStoryLine(line));
+        }
+        else if (questionText != null)
+        {
+            questionText.text = line;
+            storyLineFullyShown = true;
+        }
+
+        if (progressText != null)
+            progressText.text = $"Story {storyIntroIndex + 1}/{storyIntroLines.Count}";
+
+        if (difficultyBadge != null)
+        {
+            difficultyBadge.text = "Story Time";
+            difficultyBadge.color = new Color(0.35f, 0.65f, 1f);
+        }
+
+        if (nextButton != null)
+        {
+            TMP_Text nextButtonText = nextButton.GetComponentInChildren<TMP_Text>();
+            if (nextButtonText != null)
+            {
+                bool isLastLine = storyIntroIndex >= storyIntroLines.Count - 1;
+                nextButtonText.text = isLastLine ? "Start Quiz" : "Next";
+            }
+        }
+
+        if (storyIntroHintText != null)
+            storyIntroHintText.text = "Tap Next to continue";
+    }
+
+    private List<string> BuildStoryIntroLines()
+    {
+        string subject = PlayerPrefs.GetString("SelectedSubject", string.Empty).Trim();
+        string studentName = ResolveStudentDisplayName();
+        if (string.IsNullOrWhiteSpace(studentName))
+            studentName = "Explorer";
+
+        string lessonLine = string.IsNullOrWhiteSpace(subject)
+            ? "Today, we are going on a question adventure."
+            : $"Today, our adventure is about {subject}.";
+
+        List<string> lines = new List<string>
+        {
+            $"Hi {studentName}! Welcome to Rainbow Quiz Park!",
+            lessonLine,
+            "Each good answer helps your lantern glow brighter.",
+            "Take your time, read carefully, and enjoy learning!"
+        };
+
+        return lines;
+    }
+
+    private IEnumerator TypeStoryLine(string line)
+    {
+        if (storyIntroBodyText == null)
+            yield break;
+
+        storyIntroBodyText.text = string.Empty;
+        if (string.IsNullOrEmpty(line))
+        {
+            storyLineFullyShown = true;
+            yield break;
+        }
+
+        float delay = Mathf.Max(0.008f, storyTypeSpeed);
+        for (int i = 0; i < line.Length; i++)
+        {
+            storyIntroBodyText.text += line[i];
+            yield return new WaitForSeconds(delay);
+        }
+
+        storyLineFullyShown = true;
+        storyTypingCoroutine = null;
+    }
+
+    private void CompleteStoryLineInstant()
+    {
+        if (storyIntroIndex >= storyIntroLines.Count)
+            return;
+
+        if (storyTypingCoroutine != null)
+        {
+            StopCoroutine(storyTypingCoroutine);
+            storyTypingCoroutine = null;
+        }
+
+        string line = storyIntroLines[storyIntroIndex];
+        if (storyIntroBodyText != null)
+            storyIntroBodyText.text = line;
+        else if (questionText != null)
+            questionText.text = line;
+
+        storyLineFullyShown = true;
+    }
+
+    private IEnumerator AnimateStoryIntroPanel(bool show)
+    {
+        if (storyIntroCanvasGroup == null)
+            yield break;
+
+        if (show)
+        {
+            storyIntroCanvasGroup.alpha = 0f;
+            storyIntroCanvasGroup.blocksRaycasts = true;
+            storyIntroCanvasGroup.interactable = true;
+            if (storyIntroPanel != null)
+                storyIntroPanel.SetActive(true);
+        }
+
+        float duration = Mathf.Max(0.01f, storyFadeDuration);
+        float elapsed = 0f;
+        float start = storyIntroCanvasGroup.alpha;
+        float end = show ? 1f : 0f;
+
+        while (elapsed < duration)
+        {
+            elapsed += Time.deltaTime;
+            storyIntroCanvasGroup.alpha = Mathf.Lerp(start, end, elapsed / duration);
+            yield return null;
+        }
+
+        storyIntroCanvasGroup.alpha = end;
+
+        if (!show)
+        {
+            storyIntroCanvasGroup.blocksRaycasts = false;
+            storyIntroCanvasGroup.interactable = false;
+            if (storyIntroPanel != null)
+                storyIntroPanel.SetActive(false);
+        }
+    }
+
+    private void EnsureStoryIntroUi()
+    {
+        if (storyIntroPanel != null && storyIntroCanvasGroup != null)
+            return;
+
+        Canvas canvas = FindObjectOfType<Canvas>();
+        if (canvas == null)
+            return;
+
+        storyIntroPanel = new GameObject("MCStoryIntroPanel");
+        storyIntroPanel.transform.SetParent(canvas.transform, false);
+        storyIntroPanel.transform.SetAsLastSibling();
+
+        RectTransform panelRect = storyIntroPanel.AddComponent<RectTransform>();
+        panelRect.anchorMin = Vector2.zero;
+        panelRect.anchorMax = Vector2.one;
+        panelRect.sizeDelta = Vector2.zero;
+        panelRect.anchoredPosition = Vector2.zero;
+
+        Image panelBg = storyIntroPanel.AddComponent<Image>();
+        panelBg.color = new Color(0.06f, 0.12f, 0.24f, 0.92f);
+
+        storyIntroCanvasGroup = storyIntroPanel.AddComponent<CanvasGroup>();
+        storyIntroCanvasGroup.alpha = 0f;
+        storyIntroCanvasGroup.blocksRaycasts = false;
+        storyIntroCanvasGroup.interactable = false;
+
+        GameObject titleObj = new GameObject("Title");
+        titleObj.transform.SetParent(storyIntroPanel.transform, false);
+        RectTransform titleRect = titleObj.AddComponent<RectTransform>();
+        titleRect.anchorMin = new Vector2(0.5f, 0.82f);
+        titleRect.anchorMax = new Vector2(0.5f, 0.82f);
+        titleRect.sizeDelta = new Vector2(980f, 120f);
+        titleRect.anchoredPosition = Vector2.zero;
+
+        storyIntroTitleText = titleObj.AddComponent<TextMeshProUGUI>();
+        storyIntroTitleText.text = "Story Time";
+        storyIntroTitleText.fontSize = 64;
+        storyIntroTitleText.fontStyle = FontStyles.Bold;
+        storyIntroTitleText.alignment = TextAlignmentOptions.Center;
+        storyIntroTitleText.color = new Color(1f, 0.92f, 0.55f, 1f);
+
+        GameObject bodyObj = new GameObject("Body");
+        bodyObj.transform.SetParent(storyIntroPanel.transform, false);
+        RectTransform bodyRect = bodyObj.AddComponent<RectTransform>();
+        bodyRect.anchorMin = new Vector2(0.5f, 0.52f);
+        bodyRect.anchorMax = new Vector2(0.5f, 0.52f);
+        bodyRect.sizeDelta = new Vector2(1180f, 340f);
+        bodyRect.anchoredPosition = Vector2.zero;
+
+        storyIntroBodyText = bodyObj.AddComponent<TextMeshProUGUI>();
+        storyIntroBodyText.text = string.Empty;
+        storyIntroBodyText.fontSize = 46;
+        storyIntroBodyText.alignment = TextAlignmentOptions.Center;
+        storyIntroBodyText.color = new Color(0.96f, 0.98f, 1f, 1f);
+        storyIntroBodyText.enableWordWrapping = true;
+
+        GameObject hintObj = new GameObject("Hint");
+        hintObj.transform.SetParent(storyIntroPanel.transform, false);
+        RectTransform hintRect = hintObj.AddComponent<RectTransform>();
+        hintRect.anchorMin = new Vector2(0.5f, 0.2f);
+        hintRect.anchorMax = new Vector2(0.5f, 0.2f);
+        hintRect.sizeDelta = new Vector2(900f, 60f);
+        hintRect.anchoredPosition = Vector2.zero;
+
+        storyIntroHintText = hintObj.AddComponent<TextMeshProUGUI>();
+        storyIntroHintText.text = "Tap Next to continue";
+        storyIntroHintText.fontSize = 32;
+        storyIntroHintText.alignment = TextAlignmentOptions.Center;
+        storyIntroHintText.color = new Color(0.72f, 0.88f, 1f, 1f);
+
+        storyIntroPanel.SetActive(false);
+    }
+
+    private void SetChoicesVisible(bool visible)
+    {
+        if (choiceButtons == null)
+            return;
+
+        for (int i = 0; i < choiceButtons.Count; i++)
+        {
+            if (choiceButtons[i] != null)
+                choiceButtons[i].gameObject.SetActive(visible);
         }
     }
 
