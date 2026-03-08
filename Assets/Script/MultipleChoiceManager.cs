@@ -137,6 +137,11 @@ public class MultipleChoiceManager : MonoBehaviour
         quizStartRealtime = Time.realtimeSinceStartup;
         saveKey = $"assignment_progress_{assignmentId}_{studentId}";
 
+        // Old scene instances can keep a serialized false value even after the script default changed.
+        // Force the intro on for actual classroom-launched activities so the story flow always appears.
+        if (assignmentId > 0 && !enableStoryIntro)
+            enableStoryIntro = true;
+
         if (studentId <= 0 || assignmentId <= 0)
         {
             Debug.LogError($"MultipleChoiceManager: Missing context. studentId={studentId}, assignmentId={assignmentId}");
